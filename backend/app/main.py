@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from app.middleware import BodySizeLimitMiddleware, RequestBodyTooLarge
+from app.routers import profiles
 
 app = FastAPI(
     title="FitCheck",
@@ -43,6 +44,4 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-# Routers get registered here as they are written, e.g.
-#   from app.routers import profiles
-#   app.include_router(profiles.router)
+app.include_router(profiles.router)
