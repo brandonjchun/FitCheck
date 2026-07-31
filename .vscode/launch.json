@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python: Current File",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${file}",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}/backend",
+      "env": { "PYTHONPATH": "${workspaceFolder}/backend" },
+      "justMyCode": true
+    },
+    {
+      "name": "FastAPI: uvicorn reload",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app.main:app", "--reload", "--port", "8000"],
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}/backend",
+      "env": { "PYTHONPATH": "${workspaceFolder}/backend" },
+      "justMyCode": true
+    }
+  ]
+}

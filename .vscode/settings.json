@@ -1,0 +1,25 @@
+{
+  // The venv lives in backend/, not the workspace root, so point VS Code's
+  // interpreter discovery at that folder explicitly.
+  "python.venvPath": "${workspaceFolder}/backend",
+  "python.defaultInterpreterPath": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+
+  // New terminals activate the venv instead of inheriting conda (base).
+  "python.terminal.activateEnvironment": true,
+
+  // Run/debug from backend/ so `app.documents` resolves as a package.
+  "python.terminal.executeInFileDir": false,
+
+  // Let Pylance resolve `from app.documents import ...`.
+  "python.analysis.extraPaths": ["${workspaceFolder}/backend"],
+  "python.analysis.autoImportCompletions": true,
+
+  "python.testing.pytestEnabled": true,
+  "python.testing.unittestEnabled": false,
+  "python.testing.cwd": "${workspaceFolder}/backend",
+
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  }
+}

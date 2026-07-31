@@ -1,0 +1,55 @@
+# --- Course material (not part of the deliverable) ---
+FitCheck_Project_Spec.md
+
+# --- Python ---
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Secrets / config ---
+.env
+.env.*
+!.env.example
+
+# --- Node / frontend ---
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# --- Local test fixtures (resumes contain personal data) ---
+# Keep sample documents out of the repo. Commit a redacted fixture
+# under tests/fixtures/ deliberately if you need one.
+/samples/
+/uploads/
+*.resume.pdf
+*.resume.docx
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Editors ---
+# Ignore .vscode/* (not .vscode/) so the two files below can be re-included --
+# git cannot un-ignore a file whose parent directory is itself excluded.
+.vscode/*
+# Keep the shared workspace config: it pins the interpreter to backend/.venv
+# so a fresh clone doesn't silently run against a global Python.
+!.vscode/settings.json
+!.vscode/launch.json
+.idea/
+*.swp
+
+# --- OS ---
+Thumbs.db
+desktop.ini
+.DS_Store
