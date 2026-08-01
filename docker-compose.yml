@@ -1,0 +1,41 @@
+# Local development infrastructure. Postgres for durable state, Redis as the
+# queue broker. Both run in Linux containers, which is how they run in
+# production -- no Windows-specific builds or ports involved.
+
+services:
+  postgres:
+    # pgvector/pgvector rather than the plain postgres image: it is the
+    # official Postgres image with the pgvector extension already compiled in.
+    # M6 stores 384-dimension embeddings in this database, and swapping the
+    # image later means rebuilding the volume. Cheaper to start here.
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: fitcheck
+      POSTGRES_PASSWORD: devpassword
+      POSTGRES_DB: fitcheck
+    ports:
+      - "5432:5432"
+    volumes:
+      # Named volume, NOT a bind mount. Without this line every
+      # `docker compose down` destroys the database.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `docker compose ps` reports healthy/unhealthy instead of just
+      # "running", and workers can wait on this once they exist.
+      test: ["CMD-SHELL", "pg_isready -U fitcheck -d fitcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

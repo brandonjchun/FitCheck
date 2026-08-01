@@ -109,7 +109,7 @@ rq worker --url redis://localhost:6379 default
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
-| M1 | Resume ingestion — upload, text extraction, persisted profile | In progress |
+| M1 | Resume ingestion — upload, text extraction, persisted profile | Done |
 | M2 | Structured profile extraction with normalized skill aliases | Not started |
 | M3 | Queue skeleton — submit URL, worker transitions, polling UI | Not started |
 | M4 | Real fetching — robots, timeouts, size caps, rate limiting | Not started |
