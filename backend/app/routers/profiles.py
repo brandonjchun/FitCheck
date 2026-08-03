@@ -3,13 +3,15 @@
 import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.documents import DocumentError, extract_text
-from app.models import Profile
+from app.models import Profile, User
 from app.queue import FAILURE_TTL, JOB_TIMEOUT, RESULT_TTL, get_queue
 from app.schemas import ProfileUploadResponse
+from app.security import current_user, owned_profile
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 @router.post("", response_model=ProfileUploadResponse, status_code=201)
 def upload_resume(
     file: UploadFile = File(...),
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> Profile:
     """Accept a resume upload, store its text, and queue structured extraction.
@@ -65,7 +68,20 @@ def upload_resume(
             ),
         )
 
-    profile = Profile(original_filename=file_name, raw_text=raw_text)
+    # First resume becomes the active one; later uploads land inactive and an
+    # explicit switch promotes them. Auto-promoting the newest upload would
+    # mean uploading a draft silently swaps out whatever is driving the feed,
+    # which is a surprising thing for an upload to do.
+    has_active = db.scalar(
+        select(Profile.id).where(Profile.user_id == user.id, Profile.is_active)
+    )
+
+    profile = Profile(
+        user_id=user.id,
+        original_filename=file_name,
+        raw_text=raw_text,
+        is_active=has_active is None,
+    )
     db.add(profile)
     db.commit()
     db.refresh(profile)
@@ -91,29 +107,33 @@ def upload_resume(
 
 @router.get("/{profile_id}", response_model=ProfileUploadResponse)
 def get_profile(
-    profile_id: int, response: Response, db: Session = Depends(get_db)
+    response: Response, profile: Profile = Depends(owned_profile)
 ) -> Profile:
-    """Fetch one profile. Polled until `extraction_ok` turns true."""
-    profile = db.get(Profile, profile_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail=f"Profile {profile_id} not found")
+    """Fetch one profile. Polled until `extraction_ok` turns true.
 
+    Takes `owned_profile` rather than an id plus a lookup, so the ownership
+    predicate is structural. There is no version of this handler that
+    accidentally serves someone else's resume, because it never had the
+    chance to load one.
+    """
     response.headers["Cache-Control"] = "no-store"
     return profile
 
 
 @router.post("/{profile_id}/extract", response_model=ProfileUploadResponse, status_code=202)
-def reextract_profile(profile_id: int, db: Session = Depends(get_db)) -> Profile:
+def reextract_profile(profile: Profile = Depends(owned_profile)) -> Profile:
     """Re-run extraction for a profile whose earlier attempt failed.
 
     Closes the gap where a provider outage left a profile permanently
     un-scoreable with no way to retry it. Safe to call on an
     already-extracted profile: the task checks and returns early rather than
     spending a second API call.
+
+    Ownership matters more here than on a read. This endpoint spends an LLM
+    call, so without the predicate anyone could run up the bill on someone
+    else's profile ids.
     """
-    profile = db.get(Profile, profile_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail=f"Profile {profile_id} not found")
+    profile_id = profile.id
 
     try:
         get_queue().enqueue(

@@ -7,7 +7,7 @@ profile; all three change for different reasons.
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
 
 from app.extraction import Seniority, SkillSource
 from app.models import JobStatus
@@ -57,6 +57,48 @@ class ProfileUploadResponse(BaseModel):
     skills: list[ExtractedSkill] = []
 
     raw_text: str
+
+
+class RegisterRequest(BaseModel):
+    """Body of POST /api/auth/register.
+
+    `EmailStr` rejects a malformed address with a field-level 422 before any
+    row is written. The minimum length is deliberately a floor rather than a
+    composition rule -- no "must contain a symbol", because those rules push
+    people toward `Password1!` and measurably reduce entropy compared with
+    simply requiring more characters.
+    """
+
+    email: EmailStr
+    password: str = Field(min_length=12, max_length=1024)
+
+
+class LoginRequest(BaseModel):
+    """Body of POST /api/auth/login.
+
+    No length constraints. Validating the shape of a *submitted* password
+    tells an attacker the policy and rejects legacy passwords that predate a
+    rule change; the only question at login is whether it matches.
+    """
+
+    email: EmailStr
+    password: str
+
+
+class UserResponse(BaseModel):
+    """A user as returned to clients. Note what is absent: password_hash.
+
+    This is the concrete reason ORM models are not reused as API responses.
+    Returning a `User` directly would serialize every column it has, and the
+    first person to notice would be whoever reads the hash out of the
+    response body.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    created_at: datetime
 
 
 class JobSubmitRequest(BaseModel):

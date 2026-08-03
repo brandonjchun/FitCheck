@@ -16,10 +16,22 @@ from app.workers import tasks
 
 
 @pytest.fixture
-def profile_id():
+def profile_id(make_user):
+    """A profile owned by a throwaway user.
+
+    Profiles are NOT NULL on user_id since M3, so there is no such thing as
+    an unowned one. Cleanup happens by deleting the user, which cascades to
+    the profile and through it to any jobs.
+    """
+    user = make_user()
+
     db = SessionLocal()
     try:
-        profile = Profile(original_filename="t.pdf", raw_text="Brandon uses Python.")
+        profile = Profile(
+            user_id=user.id,
+            original_filename="t.pdf",
+            raw_text="Brandon uses Python.",
+        )
         db.add(profile)
         db.commit()
         db.refresh(profile)
@@ -27,16 +39,7 @@ def profile_id():
     finally:
         db.close()
 
-    yield pid
-
-    db = SessionLocal()
-    try:
-        obj = db.get(Profile, pid)
-        if obj is not None:
-            db.delete(obj)
-            db.commit()
-    finally:
-        db.close()
+    return pid
 
 
 @pytest.fixture

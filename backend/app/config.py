@@ -65,6 +65,43 @@ class Settings(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
 
+    # --- Sessions and auth (M3) ---
+    # Signs the session cookie. The signature is not what keeps a session
+    # secret -- the session id is 256 bits of randomness and the body lives in
+    # Redis -- but it lets a tampered or foreign cookie be rejected without a
+    # Redis round trip, and it stops a client treating the cookie as a value
+    # it can edit.
+    #
+    # The default is a development convenience and nothing more. Rotating it
+    # invalidates every outstanding cookie, which is the intended behaviour on
+    # a suspected leak. Production sets SESSION_SECRET to a real random value;
+    # a deployment that forgets is running with a published key.
+    session_secret: str = "dev-only-session-secret-change-me"
+
+    # Name of the cookie carrying the signed session id.
+    session_cookie_name: str = "fc_session"
+
+    # How long a session lives, in seconds. Applied twice on purpose: as the
+    # signature's max_age and as the Redis TTL. The signature bound means an
+    # expired cookie is rejected before touching Redis; the Redis bound is the
+    # authoritative one, and is what makes logout and revocation immediate.
+    session_ttl_seconds: int = 7 * 24 * 60 * 60
+
+    # Sets the cookie's Secure flag, which tells the browser to send it over
+    # HTTPS only. Off by default because local development is plain http on
+    # localhost and a Secure cookie would simply never be sent. Production
+    # must turn this on -- without it the session id crosses the network in
+    # the clear on any downgraded request.
+    session_cookie_secure: bool = False
+
+    # Origins allowed to make credentialed cross-origin requests. The Vite dev
+    # server default is listed because the frontend will run there while the
+    # API runs on 8000, and a session cookie is not sent cross-origin without
+    # this. Note that "*" is invalid alongside credentials -- browsers reject
+    # that pairing, correctly, since it would let any site spend a user's
+    # session.
+    cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
 
 # Imported as `from app.config import settings` -- constructed once at import
 # time, so validation failures surface at startup.

@@ -283,6 +283,21 @@ Interactive API docs at http://localhost:8000/docs. Exercise every endpoint ther
 
 > Activation is per-shell — re-run `.\.venv\Scripts\Activate.ps1` in every new terminal.
 
+### A development account
+
+Every endpoint except `/health` and the auth routes now requires a session, so a fresh database needs an account before anything is reachable. Either register through `POST /api/auth/register`, or seed the standing dev one:
+
+```powershell
+cd backend
+python -m scripts.seed_dev_user     # dev@fitcheck.dev / devpassword123
+```
+
+This is a script rather than a migration on purpose: migrations run in every environment, and a row with a published password is not something to create in production by accident. It is idempotent.
+
+> The address is `.dev`, not `.local`. `.local`, `.test`, `.localhost`, `.invalid`, and `.example` are IANA special-use domains, and the `email-validator` behind `EmailStr` rejects them — seeding one produces an account that exists in the database and can never log in.
+
+Set `SESSION_SECRET` in production. The default in `config.py` is a development convenience and is published in this repository; rotating it invalidates every outstanding cookie, which is the intended response to a suspected leak. `SESSION_COOKIE_SECURE` must also be turned on anywhere there is TLS — it is off by default because a `Secure` cookie is never sent over plain-http localhost.
+
 ### Workers
 
 Workers run in Docker rather than on the Windows host, and the reason is specific: RQ forks a child process per job so a crashed job can't take the worker down with it. `fork()` doesn't exist on Windows, so a host-run `rq worker` needs `SimpleWorker`, which executes jobs in-process and loses that isolation.
@@ -313,7 +328,7 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 | 1 | Environment | Docker up with pgvector; `/health` returns 200; Alembic runs | ✅ Done |
 | 2 | **M1** Resume ingestion | Upload PDF/DOCX → text extracted → `profiles` row → visible at `/docs` | ✅ Done |
 | 3 | **M2** Structured profile | LLM extraction validated by Pydantic; skill aliases normalized; `extraction_version` stored | ✅ Done |
-| 4 | **M3** Auth | Register/login/logout; Argon2id; Redis sessions; `owned_profile` dependency; another user's profile returns 404 | ❌ Not started |
+| 4 | **M3** Auth | Register/login/logout; Argon2id; Redis sessions; `owned_profile` dependency; another user's profile returns 404 | ✅ Done |
 | 5–6 | **M4** Queues + batch | Four queues declared and separated; submit URL → `202`; `.txt` batch → N `ingest` jobs + one aggregate status endpoint, capped; polling UI | ⚠️ Half-built |
 | 7 | **M5** Real fetching | Robots, timeouts, size caps, Redis per-domain token bucket, HTML→text, URL normalization → `canonical_key` | ❌ Placeholder |
 | 8 | **M6** Failure handling | Error classification, backoff with jitter, dead-letter registry, requeue endpoint | ❌ Not started |
@@ -330,13 +345,17 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 - **M1/M2 complete.** Resume upload, PDF/DOCX text extraction, LLM extraction behind a swappable provider seam (Gemini and Ollama), skill alias normalization, `extraction_version` stamped on every extraction, request size cap enforced in ASGI middleware, and a 171-test pytest suite covering documents, extraction, skills, providers, middleware, and endpoints.
 
   Two design points worth knowing. **Skill normalization happens on read, not on write** — `profiles.extracted` holds exactly what the model returned, so adding an alias applies retroactively to every stored profile with no backfill and no second LLM call. And **`extraction_version` is only bumped by prompt or schema changes**, not alias changes, because the latter no longer alter what was extracted.
+- **M3 complete.** Register, login, logout, and `/me`; Argon2id password hashing; opaque session ids in `HttpOnly` cookies with the body in Redis; and an `owned_profile` dependency that every profile-scoped endpoint takes so the ownership predicate cannot be left out of one handler. Reaching for another user's profile returns **404, not 403** — a 403 confirms the row exists and turns the endpoint into an id-enumeration oracle.
+
+  Sessions are server-side on purpose: revocation is a `DEL`, so logout takes effect immediately and a replayed cookie fails. A JWT would still verify.
+
 - **M4 half-built.** The endpoints, status machine, attempt counter, dedupe constraint, and retry policy are real and tested. Two things change: one `default` queue becomes four separated queues, and the batch endpoint doesn't exist yet.
 - **M5 is a deliberate placeholder.** `process_job_url` no-ops rather than faking a result, so the M5 diff reads as a feature rather than a refactor.
 - **No frontend yet.** M4 is where the polling UI lands.
 
 ### Known rework, in the order it bites
 
-1. **Ownership columns on a populated table.** `profiles` needs `user_id` and `is_active` plus the partial unique index. Rows already exist, so this is migrate-plus-backfill — and the cost grows with every upload made before M3 lands. This is why auth is scheduled at week 4 rather than later.
+1. ~~**Ownership columns on a populated table.**~~ Done in M3. `profiles` now carries `user_id` (NOT NULL, indexed, cascade) and `is_active` with the partial unique index. The pre-ownership dev profiles were deleted rather than backfilled, which is the right call for test data and the wrong one for real data — the same migration against production would assign existing rows to a real owner first.
 2. **Dedupe scope.** The existing `UNIQUE (profile_id, url_hash)` is the per-profile rule that becomes wrong once a catalog exists. It becomes a global unique on `canonical_key`. *(M5 scope.)*
 3. **URL normalization.** The current hash is deliberately un-normalized, on the reasoning that correct normalization is hard and re-fetching beats returning the wrong cached posting. That call was right for a per-profile key and is wrong for a global one — under `canonical_key`, un-normalized means duplicate catalog rows and duplicate extraction bills. The reasoning has to be reversed, not extended. *(M5 scope.)*
 

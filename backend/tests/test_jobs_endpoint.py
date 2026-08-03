@@ -44,35 +44,32 @@ def queue(monkeypatch) -> RecordingQueue:
 
 
 @pytest.fixture
-def client() -> TestClient:
+def user(make_user, as_user):
+    """The account these tests act as, authenticated on the client."""
+    return as_user(make_user())
+
+
+@pytest.fixture
+def client(user) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
 @pytest.fixture
-def profile_id() -> int:
-    """A real profiles row, cleaned up afterwards.
+def profile_id(user) -> int:
+    """A real profiles row owned by the authenticated user.
 
-    Jobs carry a FK to profiles with ON DELETE CASCADE, so deleting the
-    profile removes any jobs the test created.
+    Cleanup is by cascade: make_user deletes the account, which takes the
+    profile, which takes any jobs created against it.
     """
     db = SessionLocal()
     try:
-        profile = Profile(original_filename="t.pdf", raw_text="resume text")
+        profile = Profile(
+            user_id=user.id, original_filename="t.pdf", raw_text="resume text"
+        )
         db.add(profile)
         db.commit()
         db.refresh(profile)
-        pid = profile.id
-    finally:
-        db.close()
-
-    yield pid
-
-    db = SessionLocal()
-    try:
-        obj = db.get(Profile, pid)
-        if obj is not None:
-            db.delete(obj)
-            db.commit()
+        return profile.id
     finally:
         db.close()
 
@@ -138,16 +135,20 @@ class TestSubmitJob:
         assert first.json()["id"] == second.json()["id"]
         assert len(queue.calls) == 1
 
-    def test_same_url_for_different_profile_is_a_separate_job(
-        self, client, queue, profile_id
+    def test_same_url_for_two_of_my_profiles_is_a_separate_job(
+        self, client, queue, user, profile_id
     ):
         """The dedupe key is (profile_id, url_hash), not url alone.
 
-        Two candidates applying to the same posting are two jobs.
+        Both profiles belong to the same user here, because the endpoint now
+        rejects a profile_id the caller does not own -- so the two-resume
+        case is the only way this scenario arises through the API.
         """
         db = SessionLocal()
         try:
-            other = Profile(original_filename="o.pdf", raw_text="other")
+            other = Profile(
+                user_id=user.id, original_filename="o.pdf", raw_text="other"
+            )
             db.add(other)
             db.commit()
             db.refresh(other)
@@ -161,13 +162,6 @@ class TestSubmitJob:
 
         assert a.json()["id"] != b.json()["id"]
         assert len(queue.calls) == 2
-
-        db = SessionLocal()
-        try:
-            db.delete(db.get(Profile, other_id))
-            db.commit()
-        finally:
-            db.close()
 
     def test_redis_down_still_persists_the_job(self, client, queue, profile_id):
         """A broker outage must not lose the submission.

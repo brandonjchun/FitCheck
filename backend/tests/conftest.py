@@ -9,6 +9,7 @@ document makes its own defect obvious. A committed `corrupt.pdf` is opaque;
 
 import zipfile
 from io import BytesIO
+from uuid import uuid4
 
 import docx
 import pytest
@@ -100,6 +101,81 @@ def make_zip_without_word_parts() -> bytes:
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("not-a-word-document.txt", "hello")
     return buffer.getvalue()
+
+
+@pytest.fixture
+def make_user():
+    """Create real user rows, cleaned up afterwards.
+
+    Deleting the user cascades to their profiles and, through those, to their
+    jobs -- so tests that create data under a user need no cleanup of their
+    own.
+
+    Emails are randomised because the unique index is case-insensitive and
+    real: a fixed address would make the second test in a session collide
+    with leftovers from the first.
+
+    The domain is .dev rather than .local or .test on purpose -- those are
+    IANA special-use domains and EmailStr rejects them, so a fixture using
+    one would create accounts the API itself would refuse to register.
+    """
+    from app.db import SessionLocal
+    from app.models import User
+    from app.security import hash_password
+
+    created: list[int] = []
+
+    def _make(email: str | None = None, password: str = "testpassword123"):
+        db = SessionLocal()
+        try:
+            user = User(
+                email=email or f"t{uuid4().hex[:12]}@fitcheck.dev",
+                password_hash=hash_password(password),
+            )
+            db.add(user)
+            db.commit()
+            db.refresh(user)
+            created.append(user.id)
+            db.expunge(user)
+            return user
+        finally:
+            db.close()
+
+    yield _make
+
+    db = SessionLocal()
+    try:
+        for user_id in created:
+            obj = db.get(User, user_id)
+            if obj is not None:
+                db.delete(obj)
+        db.commit()
+    finally:
+        db.close()
+
+
+@pytest.fixture
+def as_user():
+    """Authenticate the test client as a given user.
+
+    Overrides the `current_user` dependency rather than performing a real
+    login, so tests that are about something else do not each need Redis and
+    a cookie jar. `owned_profile` is deliberately *not* overridden -- it
+    depends on `current_user`, so the real ownership predicate still runs and
+    is still what the authorization tests exercise.
+
+    The genuine cookie flow is covered end to end in test_auth.py.
+    """
+    from app.main import app
+    from app.security import current_user
+
+    def _as(user):
+        app.dependency_overrides[current_user] = lambda: user
+        return user
+
+    yield _as
+
+    app.dependency_overrides.clear()
 
 
 @pytest.fixture

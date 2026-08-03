@@ -17,13 +17,38 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.middleware import MAX_UPLOAD_BYTES
+from app.models import User
 
 UPLOAD_URL = "/api/profiles"
 
 
 @pytest.fixture
-def client() -> TestClient:
+def client(as_user) -> TestClient:
+    """An authenticated client that still touches no database.
+
+    Every case in this module resolves before the handler reaches storage, so
+    the identity only has to exist, not to be persisted -- an unsaved User
+    with an id is enough. Overriding the dependency keeps this module's
+    "needs neither Postgres nor Redis" property intact now that the endpoints
+    require a session.
+    """
+    as_user(User(id=1, email="t@test.local", password_hash="x"))
     return TestClient(app, raise_server_exceptions=False)
+
+
+def test_upload_requires_authentication() -> None:
+    """The one case here that must NOT be authenticated.
+
+    Uses its own unauthenticated client, because the module-level fixture
+    exists precisely to bypass this.
+    """
+    anonymous = TestClient(app, raise_server_exceptions=False)
+
+    response = anonymous.post(
+        UPLOAD_URL, files={"file": ("resume.pdf", make_pdf("hi"), "application/pdf")}
+    )
+
+    assert response.status_code == 401
 
 
 def test_health_returns_ok(client: TestClient) -> None:

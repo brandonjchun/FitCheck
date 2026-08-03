@@ -5,9 +5,11 @@ Business logic does not live here -- this module wires things together.
 """
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import settings
 from app.middleware import BodySizeLimitMiddleware
-from app.routers import jobs, profiles
+from app.routers import auth, jobs, profiles
 
 app = FastAPI(
     title="FitCheck",
@@ -20,6 +22,21 @@ app = FastAPI(
 # zip and can decompress far past the cap; that gets handled by worker job
 # timeouts once parsing moves off the request path.
 app.add_middleware(BodySizeLimitMiddleware)
+
+# The frontend runs on a different origin from the API in development, and a
+# session cookie is not sent cross-origin without this.
+#
+# allow_credentials=True is the part that matters, and it is why the origin
+# list is explicit. Browsers reject "*" alongside credentials -- correctly,
+# because the pairing would let any site on the internet issue authenticated
+# requests with a visitor's cookie and read the responses.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # There is deliberately no exception handler for RequestBodyTooLarge here.
@@ -40,5 +57,6 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+app.include_router(auth.router)
 app.include_router(profiles.router)
 app.include_router(jobs.router)

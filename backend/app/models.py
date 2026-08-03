@@ -12,6 +12,7 @@ from typing import Literal
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -20,6 +21,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -38,12 +40,75 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "dead"]
 TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "dead"})
 
 
+class User(Base):
+    """One account. Identity for everything a person owns.
+
+    Deliberately minimal: email verification, password reset, and profile
+    fields are all out of scope, and adding columns for them now would be
+    guessing at flows that do not exist yet.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    # citext at the database level (see the migration), so Bob@x.com and
+    # bob@x.com are one account rather than two. Doing this in Python instead
+    # -- lowercasing before every insert and lookup -- works right up until
+    # one code path forgets, and then a user has a duplicate account they
+    # cannot explain. Uniqueness enforced in the database for the same reason.
+    email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+
+    # Argon2id encoded string: algorithm, parameters, salt, and digest in one
+    # field. That format is why no separate salt column exists, and why
+    # changing the work factor later does not invalidate old hashes -- each
+    # row records the parameters it was made with.
+    password_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<User id={self.id} email={self.email!r}>"
+
+
 class Profile(Base):
     """One uploaded resume and everything derived from it."""
 
     __tablename__ = "profiles"
+    __table_args__ = (
+        Index("ix_profiles_user_id", "user_id"),
+        # Exactly one active resume per user, enforced by a partial unique
+        # index rather than by application code. Two concurrent "make this
+        # one active" requests both read "no active profile", both write, and
+        # only the database can reject the second. WHERE is_active means the
+        # constraint applies solely to active rows, so a user may keep any
+        # number of inactive ones.
+        Index(
+            "profiles_one_active_per_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("is_active"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    # CASCADE: deleting an account removes the resumes it owns. A profile
+    # without an owner is unreachable by every query in the app, so leaving
+    # one behind is a leak rather than a feature.
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    # Which resume drives this user's feed. A user may upload several
+    # versions; exactly one is current.
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
 
     original_filename: Mapped[str] = mapped_column(Text, nullable=False)
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)

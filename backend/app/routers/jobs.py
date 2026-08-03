@@ -8,9 +8,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Job, Profile, hash_url
+from app.models import Job, Profile, User, hash_url
 from app.queue import FAILURE_TTL, JOB_TIMEOUT, MAX_RETRIES, RESULT_TTL, RETRY_INTERVALS, get_queue
 from app.schemas import JobResponse, JobSubmitRequest
+from app.security import current_user
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,11 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
 @router.post("", response_model=JobResponse, status_code=202)
-def submit_job(payload: JobSubmitRequest, db: Session = Depends(get_db)) -> Job:
+def submit_job(
+    payload: JobSubmitRequest,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Job:
     """Queue a job-posting URL for processing.
 
     Returns **202 Accepted**, not 201. The distinction is the whole point of
@@ -34,7 +39,19 @@ def submit_job(payload: JobSubmitRequest, db: Session = Depends(get_db)) -> Job:
     url = str(payload.url)
     url_digest = hash_url(url)
 
-    if db.get(Profile, payload.profile_id) is None:
+    # The profile id arrives in the body rather than the path, so
+    # `owned_profile` (which reads a path parameter) does not apply -- but the
+    # predicate is the same and skipping it would be the same vulnerability.
+    # Without `user_id` here, anyone could enqueue outbound fetches against
+    # any profile id they cared to guess. 404 rather than 403, so the response
+    # does not confirm which ids exist.
+    profile = db.scalar(
+        select(Profile).where(
+            Profile.id == payload.profile_id,
+            Profile.user_id == user.id,
+        )
+    )
+    if profile is None:
         raise HTTPException(
             status_code=404, detail=f"Profile {payload.profile_id} does not exist"
         )
@@ -104,14 +121,28 @@ def submit_job(payload: JobSubmitRequest, db: Session = Depends(get_db)) -> Job:
 
 
 @router.get("/{job_id}", response_model=JobResponse)
-def get_job(job_id: int, response: Response, db: Session = Depends(get_db)) -> Job:
+def get_job(
+    job_id: int,
+    response: Response,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> Job:
     """Current state of one job. This is the endpoint the frontend polls.
 
     Sets `Cache-Control: no-store` because a cached job status is worse than
     useless -- a proxy holding a `queued` response for 30 seconds makes the
     UI look stuck when the work has already finished.
+
+    Ownership is inherited through the profile rather than stored on the job.
+    A job belongs to whoever owns the resume it was submitted for, so joining
+    keeps one source of truth; a `user_id` column here could disagree with
+    `profiles.user_id` and there would be no way to say which was right.
     """
-    job = db.get(Job, job_id)
+    job = db.scalar(
+        select(Job)
+        .join(Profile, Job.profile_id == Profile.id)
+        .where(Job.id == job_id, Profile.user_id == user.id)
+    )
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -124,14 +155,28 @@ def list_jobs(
     profile_id: int | None = None,
     status: str | None = None,
     limit: int = 50,
+    user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> list[Job]:
     """List jobs, newest first. Filterable by profile and status.
 
     Both filters hit indexed columns. This is the query the M10 ops dashboard
     is built on -- `?status=dead` is the dead-letter list.
+
+    The ownership join is not optional and not a filter the caller supplies.
+    `?profile_id=` narrows within what this user owns; it cannot widen beyond
+    it, so passing someone else's id returns an empty list rather than their
+    jobs. A listing endpoint is the easiest place to leak everything at once,
+    because one missing predicate returns every row in the table instead of
+    one.
     """
-    query = select(Job).order_by(Job.created_at.desc()).limit(min(limit, 200))
+    query = (
+        select(Job)
+        .join(Profile, Job.profile_id == Profile.id)
+        .where(Profile.user_id == user.id)
+        .order_by(Job.created_at.desc())
+        .limit(min(limit, 200))
+    )
 
     if profile_id is not None:
         query = query.where(Job.profile_id == profile_id)
