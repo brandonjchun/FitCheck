@@ -124,7 +124,20 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Profiles
+         * @description Every resume this user has uploaded, newest first.
+         *
+         *     The endpoint that makes an account durable rather than a single session.
+         *     Without it a profile was reachable only through an id the client happened
+         *     to still be holding, so a page refresh stranded every upload -- the rows
+         *     were never lost, there was simply no way left to ask for them.
+         *
+         *     Ordered by created_at with the id as a tiebreak. Two uploads can share a
+         *     timestamp, and an unstable sort makes a list that reshuffles itself
+         *     between renders for no reason the user can see.
+         */
+        get: operations["list_profiles_api_profiles_get"];
         put?: never;
         /**
          * Upload Resume
@@ -166,7 +179,27 @@ export interface paths {
         get: operations["get_profile_api_profiles__profile_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete Profile
+         * @description Delete a resume and everything derived from it.
+         *
+         *     The cascade is declared by the foreign keys rather than performed here:
+         *     `ingest_jobs.profile_id` and `url_batches.profile_id` are both ON DELETE
+         *     CASCADE, so the work submitted against this resume goes with it. That is
+         *     the honest shape -- a job scored against a resume that no longer exists
+         *     can be neither re-scored nor explained, and keeping it would leave the
+         *     ops dashboard counting work whose subject is gone.
+         *
+         *     Deleting the *active* resume promotes the newest survivor instead of
+         *     leaving the account with none. An account holding three resumes and
+         *     driving its feed from zero of them is a state with no honest UI, and its
+         *     only exit would be an activate call the client has to know to make.
+         *
+         *     204 with no body. There is no meaningful representation of a row that was
+         *     just removed, and returning the deleted object invites a client to render
+         *     it.
+         */
+        delete: operations["delete_profile_api_profiles__profile_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -195,6 +228,37 @@ export interface paths {
          *     else's profile ids.
          */
         post: operations["reextract_profile_api_profiles__profile_id__extract_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/profiles/{profile_id}/activate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Activate Profile
+         * @description Make this resume the active one.
+         *
+         *     The counterpart to upload's deliberate refusal to auto-promote. Uploading
+         *     a draft must not silently swap out whatever drives the feed, so promotion
+         *     is an explicit act -- and this is where it happens.
+         *
+         *     Two statements, one transaction, and the order is not negotiable. The
+         *     partial unique index `profiles_one_active_per_user` permits exactly one
+         *     active row per user and is enforced as each statement runs, so promoting
+         *     before demoting collides with the row being replaced. Clearing first
+         *     leaves the account momentarily with no active profile; the index allows
+         *     that, and no other transaction can observe it.
+         */
+        post: operations["activate_profile_api_profiles__profile_id__activate_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -614,6 +678,43 @@ export interface components {
             failure_ttl_seconds: number;
         };
         /**
+         * ProfileSummary
+         * @description One resume in the list of a user's uploads.
+         *
+         *     Separate from ProfileUploadResponse because of what it leaves out:
+         *     `raw_text` and `skills`. A version picker renders a filename, a date, and
+         *     a badge -- shipping the full text of every resume a user has ever uploaded
+         *     to draw that list is the kind of payload that is fine with three rows and
+         *     absurd with thirty.
+         *
+         *     `characters` survives the cut because it is the one size signal worth
+         *     showing, and it is derived from raw_text rather than stored -- see
+         *     models.Profile.characters.
+         */
+        ProfileSummary: {
+            /** Id */
+            id: number;
+            /** Filename */
+            filename: string;
+            /** Characters */
+            characters: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Is Active */
+            is_active: boolean;
+            /** Extraction Ok */
+            extraction_ok: boolean;
+            /** Seniority */
+            seniority?: ("junior" | "mid" | "senior" | "staff" | "unknown") | null;
+            /** Years Experience */
+            years_experience?: number | null;
+            /** Skill Count */
+            skill_count: number;
+        };
+        /**
          * ProfileUploadResponse
          * @description What POST /api/profiles returns once a resume has been stored.
          *
@@ -651,6 +752,11 @@ export interface components {
              * @default []
              */
             skills: components["schemas"]["ExtractedSkill"][];
+            /**
+             * Is Active
+             * @default false
+             */
+            is_active: boolean;
             /** Raw Text */
             raw_text: string;
         };
@@ -902,6 +1008,26 @@ export interface operations {
             };
         };
     };
+    list_profiles_api_profiles_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileSummary"][];
+                };
+            };
+        };
+    };
     upload_resume_api_profiles_post: {
         parameters: {
             query?: never;
@@ -966,6 +1092,35 @@ export interface operations {
             };
         };
     };
+    delete_profile_api_profiles__profile_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     reextract_profile_api_profiles__profile_id__extract_post: {
         parameters: {
             query?: never;
@@ -979,6 +1134,37 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProfileUploadResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    activate_profile_api_profiles__profile_id__activate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                profile_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

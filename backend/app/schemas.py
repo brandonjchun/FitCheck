@@ -56,7 +56,44 @@ class ProfileUploadResponse(BaseModel):
     years_experience: float | None = None
     skills: list[ExtractedSkill] = []
 
+    # Which resume currently drives this user's feed. Exposed so a client that
+    # just uploaded knows whether it changed anything: upload deliberately does
+    # not promote, so a second upload comes back `is_active: false` and the UI
+    # can say so rather than implying the new file took over.
+    is_active: bool = False
+
     raw_text: str
+
+
+class ProfileSummary(BaseModel):
+    """One resume in the list of a user's uploads.
+
+    Separate from ProfileUploadResponse because of what it leaves out:
+    `raw_text` and `skills`. A version picker renders a filename, a date, and
+    a badge -- shipping the full text of every resume a user has ever uploaded
+    to draw that list is the kind of payload that is fine with three rows and
+    absurd with thirty.
+
+    `characters` survives the cut because it is the one size signal worth
+    showing, and it is derived from raw_text rather than stored -- see
+    models.Profile.characters.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    filename: str
+    characters: int
+    created_at: datetime
+
+    is_active: bool
+    extraction_ok: bool
+    seniority: Seniority | None = None
+    years_experience: float | None = None
+
+    # A count rather than the list. The picker shows "18 skills" as a quality
+    # signal; the skills themselves belong to whichever profile is open.
+    skill_count: int
 
 
 class RegisterRequest(BaseModel):

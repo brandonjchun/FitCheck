@@ -7,7 +7,7 @@ import {
   profileApi,
   type ExtractedSkill,
   type Job,
-  type Profile,
+  type ProfileSummary,
 } from "../api/client";
 import { useMe } from "../hooks/useAuth";
 import "./Workspace.css";
@@ -103,29 +103,24 @@ function SkillPill({ skill }: { skill: ExtractedSkill }) {
   );
 }
 
-function ProfilePanel({
-  profile,
-  onReset,
-}: {
-  profile: Profile;
-  onReset: () => void;
-}) {
+function ProfilePanel({ profileId }: { profileId: number }) {
   const queryClient = useQueryClient();
   const [startedAt, setStartedAt] = useState(() => Date.now());
   const [elapsedMs, setElapsedMs] = useState(0);
 
-  const { data, isError, error } = useQuery({
-    queryKey: ["profile", profile.id],
-    queryFn: () => profileApi.get(profile.id),
-    initialData: profile,
+  /* Fetched by id rather than handed in as a prop. That is the whole change
+   * that makes a refresh survivable: the panel needs nothing but a number,
+   * and the number comes from the server's list instead of from whatever the
+   * upload mutation happened to leave in memory. */
+  const { data: current, isError, error } = useQuery({
+    queryKey: ["profile", profileId],
+    queryFn: () => profileApi.get(profileId),
     refetchInterval: (query) => {
       if (query.state.data?.extraction_ok) return false;
       if (Date.now() - startedAt > EXTRACTION_TIMEOUT_MS) return false;
       return POLL_MS;
     },
   });
-
-  const current = data ?? profile;
 
   /* A ticking clock, not a value derived during render.
    *
@@ -141,13 +136,13 @@ function ProfilePanel({
    * job stranded on an orphaned queue produced.
    */
   useEffect(() => {
-    if (current.extraction_ok) return;
+    if (current?.extraction_ok) return;
     const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
     return () => clearInterval(id);
-  }, [current.extraction_ok, startedAt]);
+  }, [current?.extraction_ok, startedAt]);
 
   const reextract = useMutation({
-    mutationFn: () => profileApi.reextract(profile.id),
+    mutationFn: () => profileApi.reextract(profileId),
     onSuccess: () => {
       // Restarting the clock is what resumes polling: the query only
       // re-evaluates refetchInterval after a fetch, and invalidate provides
@@ -155,9 +150,25 @@ function ProfilePanel({
       // already-expired deadline and stop again immediately.
       setStartedAt(Date.now());
       setElapsedMs(0);
-      queryClient.invalidateQueries({ queryKey: ["profile", profile.id] });
+      queryClient.invalidateQueries({ queryKey: ["profile", profileId] });
     },
   });
+
+  // After every hook, never between them. An early return above any of the
+  // above would change the hook count between renders.
+  if (!current) {
+    return (
+      <div className="panel card">
+        {isError ? (
+          <p className="form-error" role="alert">
+            {errorMessage(error, "That resume could not be loaded.")}
+          </p>
+        ) : (
+          <p className="panel-empty">Loading resume…</p>
+        )}
+      </div>
+    );
+  }
 
   const timedOut = !current.extraction_ok && elapsedMs > EXTRACTION_TIMEOUT_MS;
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
@@ -169,11 +180,9 @@ function ProfilePanel({
           <h3>{current.filename}</h3>
           <p className="panel-meta">
             {current.characters.toLocaleString()} characters extracted
+            {current.is_active && <span className="tag tag-ok">active</span>}
           </p>
         </div>
-        <button className="btn btn-ghost" onClick={onReset}>
-          Replace
-        </button>
       </div>
 
       {isError && (
@@ -375,9 +384,11 @@ function JobPanel({ profileId }: { profileId: number }) {
       )}
 
       <div className="notice notice-info">
-        Fetching lands at M5 — until then a queued job runs the real state
-        machine and retry policy against a placeholder that deliberately does
-        no network I/O.
+        Queued URLs are really fetched: robots.txt is checked first, requests
+        are rate limited per host and size capped, and transient failures retry
+        with backoff while a 404 or a robots disallow fails immediately rather
+        than burning the retry budget. Two people submitting the same posting
+        converge on one stored copy.
       </div>
 
       {jobs.data && jobs.data.length > 0 && (
@@ -391,19 +402,144 @@ function JobPanel({ profileId }: { profileId: number }) {
   );
 }
 
+/* --- Resume versions -------------------------------------------------- */
+
+function VersionRow({
+  version,
+  isOpen,
+  onOpen,
+  onDeleted,
+}: {
+  version: ProfileSummary;
+  isOpen: boolean;
+  onOpen: () => void;
+  onDeleted: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState(false);
+
+  const activate = useMutation({
+    mutationFn: () => profileApi.activate(version.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["profiles"] }),
+  });
+
+  const remove = useMutation({
+    mutationFn: () => profileApi.remove(version.id),
+    onSuccess: () => {
+      onDeleted();
+      queryClient.invalidateQueries({ queryKey: ["profiles"] });
+    },
+  });
+
+  const busy = activate.isPending || remove.isPending;
+
+  return (
+    <li className={`version-row ${isOpen ? "is-open" : ""}`}>
+      <button className="version-main" onClick={onOpen} aria-current={isOpen}>
+        <span className="version-name">{version.filename}</span>
+        <span className="version-meta">
+          {new Date(version.created_at).toLocaleDateString(undefined, {
+            month: "short",
+            day: "numeric",
+          })}
+          {" · "}
+          {version.extraction_ok
+            ? `${version.skill_count} skill${version.skill_count === 1 ? "" : "s"}`
+            : "not extracted"}
+        </span>
+      </button>
+
+      <div className="version-actions">
+        {version.is_active ? (
+          <span className="tag tag-ok">active</span>
+        ) : (
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => activate.mutate()}
+            disabled={busy}
+            title="Make this the resume that drives your feed"
+          >
+            {activate.isPending ? "…" : "Use this"}
+          </button>
+        )}
+
+        {/* Two-step, because it cascades. Deleting a resume takes every job
+          * submitted against it, and there is no undo. */}
+        {confirming ? (
+          <>
+            <button
+              className="btn btn-danger btn-sm"
+              onClick={() => remove.mutate()}
+              disabled={busy}
+            >
+              {remove.isPending ? "Deleting…" : "Confirm"}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setConfirming(false)}>
+              Cancel
+            </button>
+          </>
+        ) : (
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => setConfirming(true)}
+            disabled={busy}
+          >
+            Delete
+          </button>
+        )}
+      </div>
+
+      {confirming && !remove.isPending && (
+        <p className="version-warn">
+          Deletes this resume and every job submitted against it.
+        </p>
+      )}
+
+      {(activate.isError || remove.isError) && (
+        <p className="form-error" role="alert">
+          {errorMessage(activate.error ?? remove.error, "That did not work.")}
+        </p>
+      )}
+    </li>
+  );
+}
+
 /* --- Page ------------------------------------------------------------- */
 
 export function Workspace() {
   const { data: user, isLoading } = useMe();
-  const [profile, setProfile] = useState<Profile | null>(null);
+  const queryClient = useQueryClient();
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+
+  const versions = useQuery({
+    queryKey: ["profiles"],
+    queryFn: profileApi.list,
+    enabled: !!user,
+  });
 
   const upload = useMutation({
     mutationFn: (file: File) => profileApi.upload(file),
-    onSuccess: setProfile,
+    onSuccess: (created) => {
+      setSelectedId(created.id);
+      queryClient.invalidateQueries({ queryKey: ["profiles"] });
+    },
   });
 
   if (isLoading) return null;
   if (!user) return <Navigate to="/signin" replace />;
+
+  const list = versions.data ?? [];
+
+  /* Which resume is open, in priority order. An explicit click wins, but only
+   * while that row still exists -- deleting the open resume must not leave the
+   * page pointing at an id the server will 404. Otherwise the active one,
+   * since that is what the feed uses; otherwise the newest upload. */
+  const selectionIsLive = selectedId != null && list.some((v) => v.id === selectedId);
+  const openId =
+    (selectionIsLive ? selectedId : null) ??
+    list.find((v) => v.is_active)?.id ??
+    list[0]?.id ??
+    null;
 
   return (
     <main id="main" className="workspace">
@@ -416,23 +552,49 @@ export function Workspace() {
 
         <div className="workspace-grid">
           <section aria-label="Resume">
-            {profile ? (
-              <ProfilePanel profile={profile} onReset={() => setProfile(null)} />
-            ) : (
-              <div className="panel card">
-                <Dropzone onFile={(f) => upload.mutate(f)} busy={upload.isPending} />
-                {upload.isError && (
-                  <p className="form-error" role="alert">
-                    {errorMessage(upload.error, "That file could not be read.")}
-                  </p>
-                )}
-              </div>
-            )}
+            <div className="panel card">
+              <Dropzone onFile={(f) => upload.mutate(f)} busy={upload.isPending} />
+              {upload.isError && (
+                <p className="form-error" role="alert">
+                  {errorMessage(upload.error, "That file could not be read.")}
+                </p>
+              )}
+
+              {list.length > 0 && (
+                <>
+                  <div className="version-head">
+                    <h3>Your resumes</h3>
+                    {/* Stated rather than assumed. Upload does not promote, so
+                      * without this the second upload looks like it silently
+                      * did nothing. */}
+                    <p className="panel-meta">
+                      A new upload is kept as a version. The active one drives
+                      your feed.
+                    </p>
+                  </div>
+                  <ul className="version-list">
+                    {list.map((version) => (
+                      <VersionRow
+                        key={version.id}
+                        version={version}
+                        isOpen={version.id === openId}
+                        onOpen={() => setSelectedId(version.id)}
+                        onDeleted={() => setSelectedId(null)}
+                      />
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+
+            {/* Keyed on the id so switching resumes remounts rather than
+              * reusing the old one's elapsed clock and timeout deadline. */}
+            {openId != null && <ProfilePanel key={openId} profileId={openId} />}
           </section>
 
           <section aria-label="Job postings">
-            {profile ? (
-              <JobPanel profileId={profile.id} />
+            {openId != null ? (
+              <JobPanel profileId={openId} />
             ) : (
               <div className="panel card panel-locked">
                 <h3>Job postings</h3>

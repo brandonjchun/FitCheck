@@ -371,6 +371,103 @@
   overflow-wrap: anywhere;
 }
 
+/* --- Resume versions -------------------------------------------------- */
+
+.version-head {
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border);
+}
+
+.version-head h3 {
+  font-size: var(--step-0);
+}
+
+.version-list {
+  margin-top: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.version-row {
+  display: grid;
+  /* The name column takes the slack so the action buttons stay put as
+     filenames vary in length. */
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  transition: border-color var(--dur-fast) var(--ease-out-quint);
+}
+
+.version-row:hover {
+  border-color: var(--border-strong);
+}
+
+.version-row.is-open {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.version-main {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  /* Long filenames must not push the buttons off the row. */
+  min-width: 0;
+}
+
+.version-name {
+  font-size: var(--step--1);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.version-meta {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.version-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* Spans both columns so the warning sits under the row it belongs to
+   rather than squeezing the name column. */
+.version-warn,
+.version-row .form-error {
+  grid-column: 1 / -1;
+  font-size: 0.78rem;
+  color: var(--warn);
+}
+
+.tag-ok {
+  color: var(--ok);
+  border-color: color-mix(in oklch, var(--ok) 40%, transparent);
+}
+
+.btn-danger {
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 45%, transparent);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--danger) 12%, transparent);
+}
+
 @media (min-width: 980px) {
   .workspace-grid {
     grid-template-columns: 1.05fr 0.95fr;

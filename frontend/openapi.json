@@ -151,6 +151,30 @@
       }
     },
     "/api/profiles": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "List Profiles",
+        "description": "Every resume this user has uploaded, newest first.\n\nThe endpoint that makes an account durable rather than a single session.\nWithout it a profile was reachable only through an id the client happened\nto still be holding, so a page refresh stranded every upload -- the rows\nwere never lost, there was simply no way left to ask for them.\n\nOrdered by created_at with the id as a tiebreak. Two uploads can share a\ntimestamp, and an unstable sort makes a list that reshuffles itself\nbetween renders for no reason the user can see.",
+        "operationId": "list_profiles_api_profiles_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProfileSummary"
+                  },
+                  "type": "array",
+                  "title": "Response List Profiles Api Profiles Get"
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "profiles"
@@ -233,6 +257,40 @@
             }
           }
         }
+      },
+      "delete": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Delete Profile",
+        "description": "Delete a resume and everything derived from it.\n\nThe cascade is declared by the foreign keys rather than performed here:\n`ingest_jobs.profile_id` and `url_batches.profile_id` are both ON DELETE\nCASCADE, so the work submitted against this resume goes with it. That is\nthe honest shape -- a job scored against a resume that no longer exists\ncan be neither re-scored nor explained, and keeping it would leave the\nops dashboard counting work whose subject is gone.\n\nDeleting the *active* resume promotes the newest survivor instead of\nleaving the account with none. An account holding three resumes and\ndriving its feed from zero of them is a state with no honest UI, and its\nonly exit would be an activate call the client has to know to make.\n\n204 with no body. There is no meaningful representation of a row that was\njust removed, and returning the deleted object invites a client to render\nit.",
+        "operationId": "delete_profile_api_profiles__profile_id__delete",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/profiles/{profile_id}/extract": {
@@ -256,6 +314,49 @@
         ],
         "responses": {
           "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/{profile_id}/activate": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Activate Profile",
+        "description": "Make this resume the active one.\n\nThe counterpart to upload's deliberate refusal to auto-promote. Uploading\na draft must not silently swap out whatever drives the feed, so promotion\nis an explicit act -- and this is where it happens.\n\nTwo statements, one transaction, and the order is not negotiable. The\npartial unique index `profiles_one_active_per_user` permits exactly one\nactive row per user and is enforced as each statement runs, so promoting\nbefore demoting collides with the row being replaced. Clearing first\nleaves the account momentarily with no active profile; the index allows\nthat, and no other transaction can observe it.",
+        "operationId": "activate_profile_api_profiles__profile_id__activate_post",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
@@ -1113,6 +1214,80 @@
         "title": "OpsOverview",
         "description": "Everything the dashboard polls, in one response."
       },
+      "ProfileSummary": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "characters": {
+            "type": "integer",
+            "title": "Characters"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active"
+          },
+          "extraction_ok": {
+            "type": "boolean",
+            "title": "Extraction Ok"
+          },
+          "seniority": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "junior",
+                  "mid",
+                  "senior",
+                  "staff",
+                  "unknown"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seniority"
+          },
+          "years_experience": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Years Experience"
+          },
+          "skill_count": {
+            "type": "integer",
+            "title": "Skill Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "filename",
+          "characters",
+          "created_at",
+          "is_active",
+          "extraction_ok",
+          "skill_count"
+        ],
+        "title": "ProfileSummary",
+        "description": "One resume in the list of a user's uploads.\n\nSeparate from ProfileUploadResponse because of what it leaves out:\n`raw_text` and `skills`. A version picker renders a filename, a date, and\na badge -- shipping the full text of every resume a user has ever uploaded\nto draw that list is the kind of payload that is fine with three rows and\nabsurd with thirty.\n\n`characters` survives the cut because it is the one size signal worth\nshowing, and it is derived from raw_text rather than stored -- see\nmodels.Profile.characters."
+      },
       "ProfileUploadResponse": {
         "properties": {
           "id": {
@@ -1172,6 +1347,11 @@
             "type": "array",
             "title": "Skills",
             "default": []
+          },
+          "is_active": {
+            "type": "boolean",
+            "title": "Is Active",
+            "default": false
           },
           "raw_text": {
             "type": "string",

@@ -23,6 +23,7 @@ export const api = axios.create({
  * backend rename into a build error here, which is the entire argument for
  * running openapi-typescript at all. */
 export type Profile = components["schemas"]["ProfileUploadResponse"];
+export type ProfileSummary = components["schemas"]["ProfileSummary"];
 export type ExtractedSkill = components["schemas"]["ExtractedSkill"];
 export type Job = components["schemas"]["JobResponse"];
 export type User = components["schemas"]["UserResponse"];
@@ -94,6 +95,15 @@ export const profileApi = {
   },
 
   get: (id: number) => api.get<Profile>(`/api/profiles/${id}`).then((r) => r.data),
+
+  /* Summaries, not full profiles: no raw_text and no skills. Enough to draw
+   * the version list, and the open profile is fetched by id separately. */
+  list: () => api.get<ProfileSummary[]>("/api/profiles").then((r) => r.data),
+
+  activate: (id: number) =>
+    api.post<Profile>(`/api/profiles/${id}/activate`).then((r) => r.data),
+
+  remove: (id: number) => api.delete(`/api/profiles/${id}`).then(() => undefined),
 
   reextract: (id: number) =>
     api.post<Profile>(`/api/profiles/${id}/extract`).then((r) => r.data),
