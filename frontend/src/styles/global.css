@@ -1,0 +1,370 @@
+/* Global element styles and shared primitives.
+ * Component-specific rules live beside their component, not here.
+ */
+
+@import "./tokens.css";
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+}
+
+html {
+  /* Anchors and the nav's in-page links land below the fixed header rather
+   * than underneath it. scroll-padding is the honest fix; a magic offset in
+   * JS is not. */
+  scroll-padding-top: 5.5rem;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* scroll-behavior is applied only when motion is welcome. Declaring it on
+ * html unconditionally hijacks every jump for users who asked for less
+ * motion, including the ones using a keyboard to skip around. */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--step-0);
+  line-height: 1.65;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  /* The parallax rig reads scroll position off the window. A body that can
+   * scroll sideways makes those reads jitter on touchpads. */
+  overflow-x: hidden;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  line-height: 1.1;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+h1 {
+  font-size: var(--step-5);
+  letter-spacing: -0.04em;
+}
+h2 {
+  font-size: var(--step-4);
+  letter-spacing: -0.03em;
+}
+h3 {
+  font-size: var(--step-2);
+}
+
+p {
+  text-wrap: pretty;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+img,
+svg,
+video,
+canvas {
+  display: block;
+  max-width: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+/* One visible focus treatment for everything. Removing outlines without a
+ * replacement is the single most common accessibility regression in a
+ * design-led rebuild, so it is defined once, globally, and never unset. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+
+/* --- Layout primitives ------------------------------------------------ */
+
+.container {
+  width: 100%;
+  max-width: var(--container);
+  margin-inline: auto;
+  padding-inline: var(--space-5);
+}
+
+.container-narrow {
+  width: 100%;
+  max-width: var(--container-narrow);
+  margin-inline: auto;
+  padding-inline: var(--space-5);
+}
+
+.section {
+  position: relative;
+  padding-block: clamp(var(--space-8), 10vh, var(--space-10));
+}
+
+.stack > * + * {
+  margin-top: var(--space-4);
+}
+
+/* Screen-reader-only. Used for the skip link and for labels whose visual
+ * form is an icon. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: absolute;
+  top: var(--space-3);
+  left: var(--space-3);
+  z-index: 200;
+  padding: var(--space-2) var(--space-4);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-160%);
+  transition: transform var(--dur) var(--ease-out-quint);
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+}
+
+/* --- Shared surfaces -------------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+}
+
+/* Frosted panel used by the header and the hero's floating cards. The
+ * backdrop-filter is progressive: without support the panel is simply a
+ * solid surface, which is a fine outcome rather than a broken one. */
+.glass {
+  background: color-mix(in oklch, var(--surface) 72%, transparent);
+  backdrop-filter: blur(16px) saturate(180%);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid color-mix(in oklch, var(--border) 70%, transparent);
+}
+
+/* --- Text treatments -------------------------------------------------- */
+
+.gradient-text {
+  background: linear-gradient(
+    100deg,
+    var(--text) 0%,
+    var(--accent) 45%,
+    var(--accent-2) 78%,
+    var(--text) 100%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  /* Descenders in a clipped gradient get shaved without this. */
+  padding-bottom: 0.08em;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .gradient-text {
+    animation: gradient-pan 9s var(--ease-in-out) infinite alternate;
+  }
+}
+
+@keyframes gradient-pan {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 100% 50%;
+  }
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--step--1);
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* --- Buttons ---------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0.72rem 1.35rem;
+  border-radius: var(--radius-pill);
+  font-weight: 600;
+  font-size: var(--step-0);
+  border: 1px solid transparent;
+  transition: transform var(--dur-fast) var(--ease-out-quint),
+    box-shadow var(--dur) var(--ease-out-quint),
+    background-color var(--dur-fast) linear, opacity var(--dur-fast) linear;
+  white-space: nowrap;
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  box-shadow: var(--shadow-md);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  box-shadow: var(--shadow-lg), var(--shadow-glow);
+}
+
+.btn-ghost {
+  background: color-mix(in oklch, var(--surface) 60%, transparent);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--accent);
+}
+
+.btn-lg {
+  padding: 0.95rem 1.9rem;
+  font-size: var(--step-1);
+}
+
+/* Translate-on-press is gated: a 2px nudge is exactly the kind of incidental
+ * motion prefers-reduced-motion exists to suppress. */
+@media (prefers-reduced-motion: no-preference) {
+  .btn:hover:not(:disabled) {
+    transform: translateY(-2px);
+  }
+  .btn:active:not(:disabled) {
+    transform: translateY(0);
+  }
+}
+
+/* --- Forms ------------------------------------------------------------ */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.label {
+  font-size: var(--step--1);
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.input {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color var(--dur-fast) linear,
+    box-shadow var(--dur-fast) linear;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+.input::placeholder {
+  color: var(--text-faint);
+}
+
+.form-error {
+  font-size: var(--step--1);
+  color: var(--danger);
+}
+
+/* --- Badges ----------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0.28rem 0.7rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--step--1);
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+
+/* --- Global motion opt-out -------------------------------------------- */
+
+/* The blanket suppression. Individual components additionally branch on this
+ * in JS (see useReducedMotion) so that scroll-driven transforms are never
+ * computed at all -- CSS alone cannot stop a rAF loop.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

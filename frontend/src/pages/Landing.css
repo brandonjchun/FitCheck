@@ -1,0 +1,539 @@
+/* --- Hero ------------------------------------------------------------- */
+
+.hero {
+  position: relative;
+  min-height: min(100svh, 900px);
+  display: flex;
+  align-items: center;
+  padding-block: clamp(7rem, 16vh, 11rem) var(--space-9);
+  overflow: hidden;
+  /* Establishes the stacking context the parallax layers order themselves
+   * inside, so nothing here can escape and cover the fixed header. */
+  isolation: isolate;
+}
+
+.hero-canvas-layer {
+  position: absolute;
+  /* Deliberately oversized. A layer that translates on scroll must have
+   * material beyond the viewport edge, or the parallax reveals the empty gap
+   * it just moved away from. */
+  inset: -18% -6%;
+  z-index: -2;
+}
+
+/* Faint perspective grid, sitting between the canvas and the copy. Pure CSS
+ * -- two repeating gradients and a mask, no image request. */
+.hero-grid {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image: linear-gradient(
+      to right,
+      color-mix(in oklch, var(--border-strong) 40%, transparent) 1px,
+      transparent 1px
+    ),
+    linear-gradient(
+      to bottom,
+      color-mix(in oklch, var(--border-strong) 40%, transparent) 1px,
+      transparent 1px
+    );
+  background-size: 64px 64px;
+  -webkit-mask-image: radial-gradient(ellipse 60% 50% at 50% 45%, #000, transparent 78%);
+  mask-image: radial-gradient(ellipse 60% 50% at 50% 45%, #000, transparent 78%);
+  opacity: 0.5;
+}
+
+.hero-content {
+  display: grid;
+  gap: var(--space-8);
+  align-items: center;
+}
+
+.hero-copy {
+  max-width: 40rem;
+}
+
+.hero-copy h1 {
+  margin-top: var(--space-4);
+}
+
+.pulse-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 0 color-mix(in oklch, var(--accent) 60%, transparent);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .pulse-dot {
+    animation: pulse 2.4s var(--ease-in-out) infinite;
+  }
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklch, var(--accent) 55%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 9px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.hero-lede {
+  margin-top: var(--space-5);
+  font-size: var(--step-1);
+  color: var(--text-muted);
+  max-width: 34rem;
+}
+
+.hero-cta {
+  margin-top: var(--space-6);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+
+.hero-stats {
+  margin-top: var(--space-7);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: var(--space-5);
+}
+
+.hero-stats dt {
+  font-weight: 650;
+  font-size: var(--step-0);
+}
+
+.hero-stats dd {
+  margin: 0;
+  font-size: var(--step--1);
+  color: var(--text-muted);
+}
+
+.hero-fade {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 22vh;
+  background: linear-gradient(to bottom, transparent, var(--bg));
+  pointer-events: none;
+}
+
+/* --- Score card ------------------------------------------------------- */
+
+.hero-cards {
+  display: none;
+  justify-self: end;
+}
+
+.score-card {
+  width: min(370px, 100%);
+  padding: var(--space-5);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  display: grid;
+  gap: var(--space-5);
+}
+
+.score-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.score-card-role {
+  font-weight: 650;
+}
+
+.score-card-co {
+  font-size: var(--step--1);
+  color: var(--text-muted);
+}
+
+.score-ring {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+}
+
+.score-ring svg {
+  transform: rotate(-90deg);
+}
+
+.ring-track,
+.ring-value {
+  fill: none;
+  stroke-width: 4;
+  stroke-linecap: round;
+}
+
+.ring-track {
+  stroke: var(--border);
+}
+
+.ring-value {
+  stroke: var(--accent);
+  /* r=18 -> circumference ~113. 82% of it leaves ~20 remaining. */
+  stroke-dasharray: 113;
+  stroke-dashoffset: 20;
+}
+
+.score-ring span {
+  position: absolute;
+  font-weight: 700;
+  font-size: var(--step-0);
+}
+
+.score-bars {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.score-bar {
+  display: grid;
+  grid-template-columns: 4.6rem 1fr 2.6rem;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--step--1);
+}
+
+.score-bar b {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text-muted);
+}
+
+.bar {
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+
+.bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent-soft), var(--accent));
+}
+
+.bar i.bar-alt {
+  background: linear-gradient(90deg, var(--accent-3), var(--accent));
+}
+
+.score-skills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.chip {
+  padding: 0.22rem 0.6rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1px solid transparent;
+}
+
+/* Never colour alone: each bucket also carries a distinct border weight and
+ * a text label, so the grouping survives a monochrome display and the ~8% of
+ * men with a colour vision deficiency. */
+.chip-ok {
+  background: color-mix(in oklch, var(--ok) 16%, transparent);
+  border-color: color-mix(in oklch, var(--ok) 45%, transparent);
+}
+
+.chip-partial {
+  background: color-mix(in oklch, var(--warn) 18%, transparent);
+  border-color: color-mix(in oklch, var(--warn) 50%, transparent);
+  border-style: dashed;
+}
+
+.chip-missing {
+  background: color-mix(in oklch, var(--danger) 12%, transparent);
+  border-color: color-mix(in oklch, var(--danger) 42%, transparent);
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  opacity: 0.85;
+}
+
+.score-note {
+  font-size: var(--step--1);
+  color: var(--text-muted);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+
+/* --- Shared section furniture ----------------------------------------- */
+
+.section-title {
+  margin-top: var(--space-3);
+  max-width: 26ch;
+}
+
+.section-glow,
+.arch-orb,
+.cta-glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+  z-index: -1;
+}
+
+.how {
+  position: relative;
+  overflow: hidden;
+}
+
+.section-glow {
+  top: 10%;
+  right: -10%;
+  width: 46vw;
+  height: 46vw;
+  max-width: 620px;
+  max-height: 620px;
+  background: radial-gradient(
+    circle,
+    color-mix(in oklch, var(--accent) 26%, transparent),
+    transparent 70%
+  );
+}
+
+/* --- Steps ------------------------------------------------------------ */
+
+.steps {
+  margin: var(--space-7) 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: var(--space-5);
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+}
+
+.step {
+  padding: var(--space-6);
+  position: relative;
+  overflow: hidden;
+  transition: transform var(--dur) var(--ease-out-quint),
+    box-shadow var(--dur) var(--ease-out-quint),
+    border-color var(--dur) var(--ease-out-quint);
+}
+
+.step:hover {
+  border-color: color-mix(in oklch, var(--accent) 45%, var(--border));
+  box-shadow: var(--shadow-md);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .step:hover {
+    transform: translateY(-4px);
+  }
+}
+
+.step-n {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 0.1em;
+}
+
+.step h3 {
+  margin-block: var(--space-3) var(--space-2);
+}
+
+.step p {
+  color: var(--text-muted);
+  font-size: var(--step--1);
+}
+
+/* --- Architecture ----------------------------------------------------- */
+
+.architecture {
+  position: relative;
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+
+.arch-orb-a {
+  top: -8%;
+  left: -12%;
+  width: 40vw;
+  height: 40vw;
+  max-width: 540px;
+  max-height: 540px;
+  background: radial-gradient(
+    circle,
+    color-mix(in oklch, var(--accent-3) 28%, transparent),
+    transparent 70%
+  );
+}
+
+.arch-orb-b {
+  bottom: -14%;
+  right: -8%;
+  width: 36vw;
+  height: 36vw;
+  max-width: 480px;
+  max-height: 480px;
+  background: radial-gradient(
+    circle,
+    color-mix(in oklch, var(--accent-2) 24%, transparent),
+    transparent 70%
+  );
+}
+
+.layer-grid {
+  margin-top: var(--space-7);
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+}
+
+.layer {
+  padding: var(--space-5);
+}
+
+.layer h3 {
+  font-size: var(--step-1);
+  margin-bottom: var(--space-2);
+}
+
+.layer p {
+  color: var(--text-muted);
+  font-size: var(--step--1);
+}
+
+/* --- Scoring ---------------------------------------------------------- */
+
+.scoring-inner {
+  display: grid;
+  gap: var(--space-7);
+  align-items: center;
+}
+
+.scoring-copy p {
+  margin-top: var(--space-4);
+  color: var(--text-muted);
+}
+
+.formula {
+  margin-top: var(--space-5);
+  padding: var(--space-4);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  font-size: var(--step-0);
+}
+
+.formula code {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.scoring-panel {
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+  box-shadow: var(--shadow-lg);
+}
+
+.bucket {
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius);
+  border-left: 4px solid var(--border-strong);
+  background: var(--bg-sunken);
+}
+
+.bucket h4 {
+  font-size: var(--step-0);
+  margin-bottom: var(--space-1);
+}
+
+.bucket p {
+  font-size: var(--step--1);
+  color: var(--text-muted);
+}
+
+.bucket-ok {
+  border-left-color: var(--ok);
+}
+.bucket-partial {
+  border-left-color: var(--warn);
+}
+.bucket-missing {
+  border-left-color: var(--danger);
+}
+
+/* --- Closing CTA ------------------------------------------------------ */
+
+.cta {
+  position: relative;
+  overflow: hidden;
+  text-align: center;
+}
+
+.cta-glow {
+  top: 50%;
+  left: 50%;
+  translate: -50% -50%;
+  width: 60vw;
+  height: 40vw;
+  max-width: 760px;
+  background: radial-gradient(
+    ellipse,
+    color-mix(in oklch, var(--accent) 24%, transparent),
+    transparent 70%
+  );
+}
+
+.cta-inner p {
+  margin-block: var(--space-4) var(--space-6);
+  color: var(--text-muted);
+  font-size: var(--step-1);
+}
+
+/* --- Footer ----------------------------------------------------------- */
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  padding-block: var(--space-6);
+  font-size: var(--step--1);
+  color: var(--text-muted);
+}
+
+.footer-muted {
+  color: var(--text-faint);
+  margin-top: var(--space-1);
+}
+
+/* --- Responsive ------------------------------------------------------- */
+
+/* The score card is supporting material, not content. Below this width the
+ * hero copy needs the full column, so the card is dropped rather than
+ * squeezed into illegibility. */
+@media (min-width: 980px) {
+  .hero-content {
+    grid-template-columns: 1.15fr 0.85fr;
+  }
+
+  .hero-cards {
+    display: block;
+  }
+
+  .scoring-inner {
+    grid-template-columns: 1fr 1fr;
+  }
+}

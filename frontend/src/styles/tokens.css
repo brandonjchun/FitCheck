@@ -1,0 +1,189 @@
+/* Design tokens.
+ *
+ * Everything visual resolves to a variable declared here. A component that
+ * hardcodes #6d5cff is a component that cannot be themed, and the dark theme
+ * below is not an afterthought -- it is half the surface area.
+ *
+ * Colours are authored in oklch. The practical reason is lightness: in
+ * oklch, L is perceptual, so `--accent` and `--accent-strong` differing only
+ * in L are genuinely a step apart in perceived brightness. In hex or hsl the
+ * same arithmetic produces steps that look uneven across hues, which is why
+ * hand-tuned palettes drift.
+ */
+
+:root {
+  /* --- Palette: brand ------------------------------------------------- */
+  /* Violet primary, warm coral secondary. The pair is far enough apart in
+   * hue to read as two distinct signals in a chart or a skill badge, which
+   * matters once M7 renders matched/missing/partial as three groups. */
+  --brand-h: 274;
+  --accent: oklch(0.62 0.21 var(--brand-h));
+  --accent-strong: oklch(0.53 0.23 var(--brand-h));
+  --accent-soft: oklch(0.72 0.15 var(--brand-h));
+  --accent-contrast: oklch(0.99 0 0);
+
+  --accent-2: oklch(0.7 0.18 25);
+  --accent-3: oklch(0.78 0.15 195);
+
+  /* --- Semantic ------------------------------------------------------- */
+  --ok: oklch(0.68 0.16 155);
+  --warn: oklch(0.78 0.15 75);
+  --danger: oklch(0.62 0.21 25);
+
+  /* --- Light theme ---------------------------------------------------- */
+  --bg: oklch(0.99 0.004 274);
+  --bg-sunken: oklch(0.965 0.008 274);
+  --surface: oklch(1 0 0);
+  --surface-2: oklch(0.975 0.006 274);
+  --border: oklch(0.9 0.012 274);
+  --border-strong: oklch(0.82 0.02 274);
+
+  --text: oklch(0.22 0.02 274);
+  --text-muted: oklch(0.5 0.02 274);
+  --text-faint: oklch(0.62 0.018 274);
+
+  /* Shadows carry a hint of the brand hue rather than neutral grey. Pure
+   * black shadows read as dirt on a tinted background. */
+  --shadow-sm: 0 1px 2px oklch(0.4 0.05 274 / 0.06),
+    0 1px 3px oklch(0.4 0.05 274 / 0.08);
+  --shadow-md: 0 4px 12px oklch(0.4 0.05 274 / 0.08),
+    0 2px 4px oklch(0.4 0.05 274 / 0.06);
+  --shadow-lg: 0 18px 40px oklch(0.4 0.05 274 / 0.12),
+    0 6px 12px oklch(0.4 0.05 274 / 0.08);
+  --shadow-glow: 0 0 60px oklch(0.62 0.21 274 / 0.25);
+
+  /* --- Type ----------------------------------------------------------- */
+  /* System stacks only. A webfont is a render-blocking network request and
+   * a CLS source, and this app has no brand typeface to justify either. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono",
+    Menlo, Consolas, monospace;
+
+  /* Fluid scale. clamp() means no breakpoint-by-breakpoint font overrides:
+   * the middle term interpolates against viewport width between the bounds. */
+  --step--1: clamp(0.83rem, 0.8rem + 0.15vw, 0.9rem);
+  --step-0: clamp(0.95rem, 0.92rem + 0.18vw, 1.05rem);
+  --step-1: clamp(1.15rem, 1.08rem + 0.35vw, 1.35rem);
+  --step-2: clamp(1.4rem, 1.25rem + 0.7vw, 1.85rem);
+  --step-3: clamp(1.75rem, 1.45rem + 1.4vw, 2.6rem);
+  --step-4: clamp(2.2rem, 1.6rem + 2.8vw, 3.8rem);
+  --step-5: clamp(2.8rem, 1.7rem + 5vw, 5.6rem);
+
+  /* --- Space ---------------------------------------------------------- */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --space-8: 4rem;
+  --space-9: 6rem;
+  --space-10: 8rem;
+
+  /* --- Shape ---------------------------------------------------------- */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-pill: 999px;
+
+  /* --- Motion --------------------------------------------------------- */
+  /* Named easings, because `cubic-bezier(0.2, 0.8, 0.2, 1)` scattered across
+   * twenty files is unreviewable. --ease-out-quint is the workhorse: fast
+   * departure, long settle, which reads as responsive rather than floaty. */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --dur-fast: 140ms;
+  --dur: 260ms;
+  --dur-slow: 520ms;
+
+  --container: 1180px;
+  --container-narrow: 760px;
+
+  /* --- Hero canvas ----------------------------------------------------
+   * Kept as plain hex rather than oklch because these are read by
+   * getComputedStyle and handed to a canvas 2D context. Browser support for
+   * oklch() in `fillStyle` is still uneven, and a rejected colour string
+   * fails silently -- the shape is simply painted in the previous colour,
+   * which is a genuinely confusing bug to chase. Hex removes the question.
+   */
+  --hero-1: #7c5cff;
+  --hero-2: #ff6b8a;
+  --hero-3: #38bdf8;
+  --hero-ink: #2a2140;
+}
+
+/* Dark theme.
+ *
+ * Two selectors, deliberately. The media query is the default signal so a
+ * first-time visitor gets the theme their OS asked for; the [data-theme]
+ * attribute is what the in-app toggle sets, and it has to win in BOTH
+ * directions -- a user who picks light on a dark OS must get light. That is
+ * why the light overrides are restated under [data-theme="light"] rather
+ * than relying on :root alone.
+ */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: oklch(0.16 0.018 274);
+    --bg-sunken: oklch(0.13 0.016 274);
+    --surface: oklch(0.2 0.02 274);
+    --surface-2: oklch(0.24 0.022 274);
+    --border: oklch(0.31 0.025 274);
+    --border-strong: oklch(0.42 0.03 274);
+
+    --text: oklch(0.95 0.008 274);
+    --text-muted: oklch(0.74 0.015 274);
+    --text-faint: oklch(0.6 0.018 274);
+
+    /* Brighter and less saturated than the light-theme accent. A colour
+     * tuned for white burns against a dark field. */
+    --accent: oklch(0.72 0.18 var(--brand-h));
+    --accent-strong: oklch(0.8 0.16 var(--brand-h));
+    --accent-soft: oklch(0.62 0.16 var(--brand-h));
+    --accent-contrast: oklch(0.14 0.02 274);
+
+    --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.4);
+    --shadow-md: 0 4px 14px oklch(0 0 0 / 0.45);
+    --shadow-lg: 0 20px 50px oklch(0 0 0 / 0.55);
+    --shadow-glow: 0 0 80px oklch(0.72 0.18 274 / 0.3);
+
+    /* Brighter and cooler on dark; the light-theme trio muddies against a
+     * near-black field. */
+    --hero-1: #9d86ff;
+    --hero-2: #ff7d99;
+    --hero-3: #56cdff;
+    --hero-ink: #e8e4ff;
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: oklch(0.16 0.018 274);
+  --bg-sunken: oklch(0.13 0.016 274);
+  --surface: oklch(0.2 0.02 274);
+  --surface-2: oklch(0.24 0.022 274);
+  --border: oklch(0.31 0.025 274);
+  --border-strong: oklch(0.42 0.03 274);
+
+  --text: oklch(0.95 0.008 274);
+  --text-muted: oklch(0.74 0.015 274);
+  --text-faint: oklch(0.6 0.018 274);
+
+  --accent: oklch(0.72 0.18 var(--brand-h));
+  --accent-strong: oklch(0.8 0.16 var(--brand-h));
+  --accent-soft: oklch(0.62 0.16 var(--brand-h));
+  --accent-contrast: oklch(0.14 0.02 274);
+
+  --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.4);
+  --shadow-md: 0 4px 14px oklch(0 0 0 / 0.45);
+  --shadow-lg: 0 20px 50px oklch(0 0 0 / 0.55);
+  --shadow-glow: 0 0 80px oklch(0.72 0.18 274 / 0.3);
+
+  --hero-1: #9d86ff;
+  --hero-2: #ff7d99;
+  --hero-3: #56cdff;
+  --hero-ink: #e8e4ff;
+}

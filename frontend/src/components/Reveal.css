@@ -1,0 +1,12 @@
+.reveal {
+  /* No initial opacity/transform here on purpose -- see the comment in
+   * Reveal.tsx. Hiding content in CSS that only JS can reveal is how a page
+   * ends up blank for anyone whose script did not run. */
+  transition: opacity 700ms var(--ease-out-quint),
+    transform 700ms var(--ease-out-quint);
+}
+
+.reveal-in {
+  opacity: 1;
+  transform: none;
+}

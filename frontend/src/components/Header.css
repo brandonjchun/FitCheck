@@ -1,0 +1,133 @@
+.site-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  transition: background-color var(--dur) var(--ease-out-quint),
+    border-color var(--dur) var(--ease-out-quint),
+    backdrop-filter var(--dur) var(--ease-out-quint);
+  border-bottom: 1px solid transparent;
+}
+
+/* Transparent over the hero, frosted once you have scrolled past it. The
+ * border only appears in the scrolled state so the header has no visible
+ * edge floating over the canvas. */
+.site-header.is-scrolled {
+  background: color-mix(in oklch, var(--bg) 78%, transparent);
+  backdrop-filter: blur(14px) saturate(180%);
+  -webkit-backdrop-filter: blur(14px) saturate(180%);
+  border-bottom-color: var(--border);
+}
+
+.header-inner {
+  max-width: var(--container);
+  margin-inline: auto;
+  padding: var(--space-3) var(--space-5);
+  display: flex;
+  align-items: center;
+  gap: var(--space-5);
+}
+
+.logo {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-weight: 700;
+  font-size: var(--step-1);
+  letter-spacing: -0.02em;
+}
+
+.logo-mark {
+  display: grid;
+  place-items: center;
+  filter: drop-shadow(0 4px 10px oklch(0.62 0.21 274 / 0.35));
+}
+
+.header-nav {
+  display: none;
+  gap: var(--space-5);
+  margin-inline-start: var(--space-4);
+  font-size: var(--step--1);
+  font-weight: 550;
+  color: var(--text-muted);
+}
+
+.header-nav a {
+  position: relative;
+  padding-block: var(--space-1);
+  transition: color var(--dur-fast) linear;
+}
+
+.header-nav a:hover {
+  color: var(--text);
+}
+
+/* Underline grows from the left rather than fading in. A transform-driven
+ * underline animates on the compositor; animating `width` would relayout. */
+.header-nav a::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  height: 1.5px;
+  background: var(--accent);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--dur) var(--ease-out-quint);
+}
+
+.header-nav a:hover::after {
+  transform: scaleX(1);
+}
+
+.header-actions {
+  margin-inline-start: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.header-link {
+  font-weight: 600;
+  font-size: var(--step--1);
+  color: var(--text-muted);
+  transition: color var(--dur-fast) linear;
+}
+
+.header-link:hover {
+  color: var(--text);
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: color-mix(in oklch, var(--surface) 55%, transparent);
+  color: var(--text-muted);
+  transition: color var(--dur-fast) linear,
+    border-color var(--dur-fast) linear, background-color var(--dur-fast) linear;
+}
+
+.icon-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* The nav links and the smaller action buttons are the first things to go on
+ * a narrow screen; the logo and primary CTA always survive. */
+@media (max-width: 860px) {
+  .header-actions .btn-ghost {
+    display: none;
+  }
+}
+
+@media (min-width: 900px) {
+  .header-nav {
+    display: flex;
+  }
+}
