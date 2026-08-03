@@ -1,6 +1,9 @@
 # --- Course material (not part of the deliverable) ---
 FitCheck_Project_Spec.md
 
+# --- Private working notes: known gaps and deferred decisions ---
+PROJECTLIMITATIONS.md
+
 # --- Python ---
 .venv/
 venv/
