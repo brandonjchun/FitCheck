@@ -803,6 +803,64 @@ class Match(Base):
         )
 
 
+# What a user said about a match. Text rather than an enum for the same reason
+# as everywhere else here: this vocabulary will grow (`dismissed`, `saved`,
+# `interviewed`), and each addition should be a no-op rather than an ALTER TYPE.
+FeedbackVerdict = Literal["interested", "not_interested", "applied"]
+
+VERDICTS: tuple[str, ...] = ("interested", "not_interested", "applied")
+
+
+class MatchFeedback(Base):
+    """One judgment a user made about one recommendation.
+
+    Spec section 8.6. This table is not read by anything that ranks, and that
+    is deliberate rather than unfinished: the weights stay hand-set this
+    semester and the honest claim is "here is the labelled data I would need
+    and the model I would fit", not a learning-to-rank system built on a
+    few dozen clicks. What matters now is that the labels are *collected*,
+    because they cannot be collected retroactively.
+
+    **Append-only, not one row per match.** A user who marks a posting
+    interested and later applies has produced two facts, both true, and the
+    sequence between them is signal -- collapsing to the latest verdict throws
+    away the funnel. It also means a mis-click is corrected by a later row
+    rather than by destroying the earlier one.
+
+    **Keyed on the match, not on (profile, posting).** The match is what the
+    user was actually looking at when they judged, and it carries the score
+    and the `scorer_version` that produced it. A label whose features cannot
+    be reconstructed is not trainable, so pointing at the match keeps the
+    label attached to the scoring generation it was a reaction to.
+    """
+
+    __tablename__ = "match_feedback"
+    __table_args__ = (
+        Index("ix_match_feedback_match_id", "match_id"),
+        # The query the eventual training set is drawn from: every label in
+        # creation order. Cheap to add now, and an index added later against a
+        # populated table is a lock nobody wants during a demo.
+        Index("ix_match_feedback_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    match_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("matches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    verdict: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<MatchFeedback match={self.match_id} {self.verdict}>"
+
+
 # What kind of board a source is, which decides which adapter enumerates it.
 #
 # Text rather than an enum for the same reason `status` is: adding a kind is

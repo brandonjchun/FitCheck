@@ -18,6 +18,7 @@ no endpoint grants it.
 """
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from rq import Queue, Retry, Worker
@@ -31,7 +32,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import IngestJob
+from app.models import IngestJob, JobPosting, Source
+from app.workers.tasks import gate_stats
 from app.queues import (
     FAILURE_TTL,
     JOB_TIMEOUT,
@@ -46,9 +48,11 @@ from app.queues import (
 )
 from app.schemas import (
     DeadLetterItem,
+    GateStats,
     OpsOverview,
     QueueHealth,
     RequeueResponse,
+    SourceFreshness,
     StatusCount,
     WorkerInfo,
 )
@@ -140,7 +144,61 @@ def overview(db: Session = Depends(get_db)) -> OpsOverview:
         job_timeout_seconds=JOB_TIMEOUT,
         result_ttl_seconds=RESULT_TTL,
         failure_ttl_seconds=FAILURE_TTL,
+        sources=_source_freshness(db),
+        gate=GateStats(**gate_stats()),
     )
+
+
+def _source_freshness(db: Session) -> list[SourceFreshness]:
+    """Per-source crawl freshness, the M10 half of the dashboard.
+
+    One grouped query for the posting counts rather than a count per source:
+    five boards is five round trips today and fifty is fifty, and this runs on
+    whatever interval the dashboard polls at.
+    """
+    counts = dict(
+        db.execute(
+            select(JobPosting.source_id, func.count())
+            .where(
+                JobPosting.source_id.is_not(None),
+                JobPosting.closed_at.is_(None),
+            )
+            .group_by(JobPosting.source_id)
+        ).all()
+    )
+
+    now = datetime.now(UTC)
+    out: list[SourceFreshness] = []
+
+    for source in db.execute(select(Source).order_by(Source.display_name)).scalars():
+        age: float | None = None
+        if source.last_success_at is not None:
+            age = (now - source.last_success_at).total_seconds()
+
+        # A source that has never succeeded is stale by definition rather than
+        # by arithmetic -- there is no age to compare, and treating "unknown"
+        # as fresh would hide exactly the board that has never worked.
+        stale = age is None or age > source.crawl_interval_seconds
+
+        out.append(
+            SourceFreshness(
+                id=source.id,
+                kind=source.kind,
+                board_token=source.board_token,
+                display_name=source.display_name,
+                enabled=source.enabled,
+                crawl_interval_seconds=source.crawl_interval_seconds,
+                last_crawled_at=source.last_crawled_at,
+                last_success_at=source.last_success_at,
+                consecutive_failures=source.consecutive_failures,
+                circuit_open=source.circuit_open,
+                seconds_since_success=age,
+                is_stale=stale,
+                open_postings=int(counts.get(source.id, 0)),
+            )
+        )
+
+    return out
 
 
 @router.get("/dead-letter", response_model=list[DeadLetterItem])

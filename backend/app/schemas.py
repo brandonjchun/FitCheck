@@ -272,6 +272,57 @@ class StatusCount(BaseModel):
     count: int
 
 
+class SourceFreshness(BaseModel):
+    """How current one board's slice of the catalog is.
+
+    `last_success_at` is the honest freshness figure and `last_crawled_at` is
+    not: a source that has been attempted every hour and succeeded once last
+    week looks perfectly healthy on the second column alone. Both are exposed
+    so the gap between them is visible, because that gap *is* the failure --
+    a crawler that runs on schedule and returns nothing produces a catalog
+    that ages while every dashboard says it is being tended.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    kind: str
+    board_token: str
+    display_name: str
+    enabled: bool
+    crawl_interval_seconds: int
+
+    last_crawled_at: datetime | None = None
+    last_success_at: datetime | None = None
+    consecutive_failures: int
+    circuit_open: bool
+
+    # Derived rather than stored: seconds since the last *successful* crawl,
+    # and whether that exceeds this source's own interval. Computed server-side
+    # so every client agrees on what "stale" means instead of each reimplementing
+    # the comparison against its own clock.
+    seconds_since_success: float | None = None
+    is_stale: bool
+
+    open_postings: int
+
+
+class GateStats(BaseModel):
+    """Content-hash gate effectiveness.
+
+    The measurement spec section 6.7 asks to be *reported* rather than
+    asserted. Counters are process-lifetime and unpartitioned, so this mixes a
+    board's first crawl -- where every posting is necessarily a miss -- with
+    the steady-state re-crawls the number is actually about. Read it as a
+    floor on the gate's value, not as the steady-state rate.
+    """
+
+    hits: int
+    misses: int
+    total: int
+    hit_rate: float
+
+
 class OpsOverview(BaseModel):
     """Everything the dashboard polls, in one response."""
 
@@ -281,6 +332,9 @@ class OpsOverview(BaseModel):
     job_timeout_seconds: int
     result_ttl_seconds: int
     failure_ttl_seconds: int
+
+    sources: list[SourceFreshness]
+    gate: GateStats
 
 
 class DeadLetterItem(BaseModel):
@@ -368,3 +422,32 @@ class MatchResponse(BaseModel):
     posting_url: str | None = None
     posting_title: str | None = None
     posting_company: str | None = None
+
+
+class FeedbackCreate(BaseModel):
+    """A user's judgment on one recommendation.
+
+    The verdict is a Literal rather than a plain string so an unknown value is
+    a 422 naming the alternatives, produced before the request reaches a
+    handler. The database column is deliberately unconstrained text -- see
+    `MatchFeedback` -- which puts the vocabulary in exactly one place that can
+    explain itself to a caller.
+    """
+
+    verdict: Literal["interested", "not_interested", "applied"]
+
+
+class FeedbackResponse(BaseModel):
+    """A recorded label.
+
+    Returns the row rather than an empty 201 so the client has the id and the
+    server's `created_at`, which is what orders the funnel. A client that
+    stamped its own time would be recording clock skew as sequence.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    match_id: int
+    verdict: str
+    created_at: datetime
