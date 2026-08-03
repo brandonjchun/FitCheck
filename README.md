@@ -340,9 +340,9 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 | 2 | **M1** Resume ingestion | Upload PDF/DOCX → text extracted → `profiles` row → visible at `/docs` | ✅ Done |
 | 3 | **M2** Structured profile | LLM extraction validated by Pydantic; skill aliases normalized; `extraction_version` stored | ✅ Done |
 | 4 | **M3** Auth | Register/login/logout; Argon2id; Redis sessions; `owned_profile` dependency; another user's profile returns 404 | ✅ Done |
-| 5–6 | **M4** Queues + batch | Four queues declared and separated; submit URL → `202`; `.txt` batch → N `ingest` jobs + one aggregate status endpoint, capped; polling UI | ⚠️ Half-built |
-| 7 | **M5** Real fetching | Robots, timeouts, size caps, Redis per-domain token bucket, HTML→text, URL normalization → `canonical_key` | ❌ Placeholder |
-| 8 | **M6** Failure handling | Error classification, backoff with jitter, dead-letter registry, requeue endpoint | ❌ Not started |
+| 5–6 | **M4** Queues + batch | Four queues declared and separated; submit URL → `202`; `.txt` batch → N `ingest` jobs + one aggregate status endpoint, capped; polling UI | ✅ Backend done; polling UI pending |
+| 7 | **M5** Real fetching | Robots, timeouts, size caps, Redis per-domain token bucket, HTML→text, URL normalization → `canonical_key` | ✅ Done |
+| 8 | **M6** Failure handling | Error classification, backoff with jitter, dead-letter registry, requeue endpoint | ⚠️ Classification and jitter done in M5; dead-letter/requeue endpoint pending |
 | 9 | **M7** Scoring (Path A) | Embeddings in pgvector; skill overlap; blended score persisted to `matches`. **Path A is demoable here** | ❌ Not started |
 | 10–11 | **M8** Catalog + crawler | `sources` seeded with 5 boards; `discover` enumerates; fan-out; content-hash hit rate measured; guarded closure detection | ❌ Not started |
 | 12 | **M9** Recommendations | HNSW index; two-stage recall→rerank; `score_profile` job; feed is a pure indexed SELECT; p95 vs exact scan | ❌ Not started |
@@ -360,15 +360,18 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 
   Sessions are server-side on purpose: revocation is a `DEL`, so logout takes effect immediately and a replayed cookie fails. A JWT would still verify.
 
-- **M4 half-built.** The endpoints, status machine, attempt counter, dedupe constraint, and retry policy are real and tested. Two things change: one `default` queue becomes four separated queues, and the batch endpoint doesn't exist yet.
-- **M5 is a deliberate placeholder.** `process_job_url` no-ops rather than faking a result, so the M5 diff reads as a feature rather than a refactor.
-- **No frontend yet.** M4 is where the polling UI lands.
+- **M4 backend complete.** Four separated queues with two worker classes, plus the batch `.txt` upload that fans out onto `ingest`. Caps are counts rather than bytes — the 2 MB body limit bounds bytes, and 2 MB of text is roughly 40,000 URLs. Batch progress is derived with a `GROUP BY`, never a stored counter that N workers would double-count.
+- **M5 complete.** Real fetching: robots-checked and cached, connect/read timeouts, a size cap enforced *while streaming* rather than from a `Content-Length` a server can omit or lie about, and a Redis token bucket shared across worker processes.
+
+  Verified through the whole stack, not just in tests — API → `ingest` queue → containerised worker → `job_postings`. A four-URL batch drained in 4 seconds: two succeeded, two went straight to `dead` (a 404 and a robots disallow) without consuming a single retry.
+
+- **Frontend exists** (landing, sign-in, workspace) and is wired to session auth. The batch progress view is what's still missing from M4's definition of done.
 
 ### Known rework, in the order it bites
 
 1. ~~**Ownership columns on a populated table.**~~ Done in M3. `profiles` now carries `user_id` (NOT NULL, indexed, cascade) and `is_active` with the partial unique index. The pre-ownership dev profiles were deleted rather than backfilled, which is the right call for test data and the wrong one for real data — the same migration against production would assign existing rows to a real owner first.
-2. **Dedupe scope.** The existing `UNIQUE (profile_id, url_hash)` is the per-profile rule that becomes wrong once a catalog exists. It becomes a global unique on `canonical_key`. *(M5 scope.)*
-3. **URL normalization.** The current hash is deliberately un-normalized, on the reasoning that correct normalization is hard and re-fetching beats returning the wrong cached posting. That call was right for a per-profile key and is wrong for a global one — under `canonical_key`, un-normalized means duplicate catalog rows and duplicate extraction bills. The reasoning has to be reversed, not extended. *(M5 scope.)*
+2. ~~**Dedupe scope.**~~ Done in M5. `job_postings.canonical_key` is globally unique, so two users submitting one posting land on one row. `jobs`' per-profile `UNIQUE (profile_id, url_hash)` stays — it dedupes *work*, which is a different question from deduping *postings*.
+3. ~~**URL normalization.**~~ Done in M5, and the reasoning is genuinely inverted rather than extended. `hash_url` still does not normalize, which remains right for a per-profile key where re-fetching beats serving the wrong cached posting. `canonical_key_for_url` does normalize, because for a global key un-normalized means one posting stored twice under two tracking URLs and extracted twice at full LLM cost.
 
 None of that is M1–M3 rework.
 
