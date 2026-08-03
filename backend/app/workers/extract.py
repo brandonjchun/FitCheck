@@ -1,15 +1,20 @@
-"""Turn a resume's raw text into a validated ExtractedProfile.
+"""Turn raw text into validated structured data -- resumes and job postings.
 
-Provider-agnostic: the prompt, the validation, and the error classification
+Provider-agnostic: the prompts, the validation, and the error classification
 live here once, and get_provider() decides which LLM actually runs. Swapping
 Gemini for Ollama changes a line in .env and nothing in this file.
+
+Both extractions share everything except the prompt and the schema, which is
+the argument for one module. What they deliberately do *not* share is the
+output shape -- see ExtractedPosting for why a resume and a job description
+are not the same document with different words in it.
 """
 
 import logging
 
 from pydantic import ValidationError
 
-from app.extraction import ExtractedProfile
+from app.extraction import ExtractedPosting, ExtractedProfile
 from app.providers import LLMPermanentError, LLMTransientError, get_provider
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,21 @@ class EmptyDocumentError(LLMPermanentError):
 # past anything legitimate. Truncating bounds both cost and context usage,
 # and a document this long is malformed rather than thorough.
 MAX_RESUME_CHARS = 40_000
+
+# Postings get a smaller budget than resumes, which looks backwards until you
+# look at what the extra characters are. A fetched posting is a whole web
+# page reduced to text: the job description is usually the first 2-4k
+# characters, and the rest is the company's boilerplate, benefits, EEO
+# statement, and a footer of other openings. Measured across 12 real postings
+# the usable range was 1,700-18,000 characters, so 20k keeps every one of
+# them intact.
+#
+# The failure this bounds is worse than cost. A footer listing eight other
+# roles is *plausible job description text*, so a model reading past the end
+# of the posting will happily attribute those requirements to this one --
+# extracting skills for a job that is not the job. Truncation is a blunt
+# guard against that, and the noise selectors in fetch.py are the sharp one.
+MAX_POSTING_CHARS = 20_000
 
 SYSTEM_INSTRUCTIONS = """\
 You extract structured data from resumes. You are given the raw text of one \
@@ -131,3 +151,103 @@ def extract_profile(raw_text: str) -> ExtractedProfile:
     # evidence span. Canonicalizing on read (models.Profile.skills) costs a
     # dict lookup per skill and makes an alias fix retroactive for free.
     return profile
+
+
+POSTING_INSTRUCTIONS = """\
+You extract structured requirements from job postings. You are given the \
+text of one job posting and must return JSON matching the provided schema \
+exactly.
+
+Rules:
+
+- Extract only what the posting states. Never invent skills, titles, or \
+seniority that do not appear in the text.
+- The text is a web page reduced to prose, so it may contain navigation, \
+benefits, an equal-opportunity statement, or links to *other* openings. \
+Extract requirements for the single role this page is about. If a phrase \
+belongs to a different job, ignore it.
+- `name` must be the short canonical term a resume would use -- \
+"TypeScript", "Kubernetes", "Unit testing", "DuckDB". Never put a whole \
+requirement sentence in it. "Experience with automated test coverage" is a \
+name of "Unit testing"; "comfort with AI-assisted agentic coding tools" is a \
+name of "AI coding tools". The full wording belongs in `evidence`, which is \
+what it is for.
+- Skip requirements that name no skill at all. "Excellent communication", \
+"a growth mindset", and "5 years in a fast-paced environment" are real \
+things a posting asks for and are not skills; listing them produces \
+requirements that no resume can ever satisfy.
+- For each skill, `evidence` must be a phrase copied verbatim from the \
+posting. If you cannot quote a supporting phrase, do not list the skill.
+- `necessity` is the most important field. Answer "required" when the \
+posting treats the skill as a must-have -- listed under requirements or \
+qualifications, or worded as "must have", "strong background in", or \
+"X+ years of". Answer "preferred" when it is explicitly optional -- \
+"preferred", "nice to have", "bonus", "a plus", "desirable", "familiarity \
+with". Answer "unknown" only when the posting mentions the skill with no \
+signal either way, such as in a paragraph describing the team's stack.
+- `min_years` on a skill is a threshold the posting asks for in that skill \
+specifically, as in "5+ years of Java". Leave it null when the posting does \
+not state one. Do not derive it from the seniority of the role.
+- `min_years_experience` is the role-level threshold, as in "3+ years of \
+professional software engineering". It is separate from any per-skill \
+number. Leave it null if the posting does not state one.
+- `seniority` reflects the scope of the role. Use "unknown" rather than \
+inferring it from a years requirement alone.
+- `remote_type` is "remote" only if the role can be performed fully \
+remotely. A role requiring any days on site is "hybrid". Use "unknown" when \
+the posting does not say -- most do not.
+
+Return only the JSON object.\
+"""
+
+
+def extract_posting(raw_text: str) -> ExtractedPosting:
+    """Extract structured requirements from a job posting's text.
+
+    Args:
+        raw_text: Readable text produced by fetch.html_to_text.
+
+    Returns:
+        A validated ExtractedPosting holding exactly what the model returned.
+        Skill names are NOT canonicalized here, for the same reason resume
+        skills are not -- see models.JobPosting.skills.
+
+    Raises:
+        EmptyDocumentError: The posting has no extractable text.
+        LLMTransientError: The provider failed in a retryable way, or the
+            model returned output that did not satisfy the schema.
+        LLMPermanentError: The provider is misconfigured in a way retrying
+            cannot fix.
+    """
+    if not raw_text.strip():
+        # Same reasoning as the resume path: raising keeps `extraction_ok`
+        # able to distinguish "the model found nothing" from "the model never
+        # ran". A posting that fetched to an empty body is usually a
+        # client-rendered page, which no retry improves.
+        raise EmptyDocumentError(
+            "posting contains no extractable text; a JavaScript-rendered page "
+            "is the usual cause"
+        )
+
+    document = raw_text[:MAX_POSTING_CHARS]
+    if len(raw_text) > MAX_POSTING_CHARS:
+        logger.warning(
+            "posting truncated for extraction: %d chars -> %d",
+            len(raw_text),
+            MAX_POSTING_CHARS,
+        )
+
+    provider = get_provider()
+    prompt = f"{POSTING_INSTRUCTIONS}\n\n=== JOB POSTING TEXT ===\n{document}"
+
+    raw_json = provider.complete_json(prompt, ExtractedPosting.model_json_schema())
+
+    try:
+        posting = ExtractedPosting.model_validate_json(raw_json)
+    except ValidationError as exc:
+        logger.warning("posting extraction failed validation; raw output: %.500s", raw_json)
+        raise LLMTransientError(
+            f"{provider.name} returned output that did not match the schema: {exc}"
+        ) from exc
+
+    return posting

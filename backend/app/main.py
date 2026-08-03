@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.middleware import BodySizeLimitMiddleware
-from app.routers import auth, batches, jobs, ops, profiles
+from app.routers import auth, batches, jobs, matches, ops, profiles
 
 app = FastAPI(
     title="FitCheck",
@@ -61,4 +61,5 @@ app.include_router(auth.router)
 app.include_router(profiles.router)
 app.include_router(jobs.router)
 app.include_router(batches.router)
+app.include_router(matches.router)
 app.include_router(ops.router)

@@ -6,6 +6,7 @@ profile; all three change for different reasons.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
 
@@ -297,3 +298,73 @@ class RequeueResponse(BaseModel):
     id: int
     status: str
     queue: str
+
+
+class MatchSkill(BaseModel):
+    """One posting requirement, judged against the candidate.
+
+    The unit the UI renders as a green / amber / red row. `bucket` carries
+    the verdict and `evidence` carries the posting's own words for it, so a
+    user can see what the score was reacting to rather than being told a
+    number.
+    """
+
+    name: str
+    necessity: Literal["required", "preferred", "unknown"]
+    bucket: Literal["matched", "partial", "missing"]
+    required_years: float | None = None
+    candidate_years: float | None = None
+    evidence: str | None = None
+
+
+class MatchCounts(BaseModel):
+    matched: int
+    partial: int
+    missing: int
+    # Broken out because it is the only count that decides anything. A
+    # candidate missing four preferred skills is a fine applicant; one
+    # missing a single required skill usually is not, and a UI that shows
+    # only a total cannot tell those apart.
+    missing_required: int
+
+
+class MatchResponse(BaseModel):
+    """One scored (profile, posting) pair, with the reasoning attached.
+
+    Both sub-scores travel with the final one, and the skill breakdown
+    travels with both. Spec section 8.4 requires it, and the reason is that
+    a blended number alone is unfalsifiable -- 0.35 says nothing a user can
+    act on, while "you match 2 of 5 requirements and are short on React
+    years" does.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    profile_id: int
+    job_posting_id: int
+
+    semantic_score: float
+    skill_score: float
+    final_score: float
+
+    origin: str
+    # Surfaced deliberately. A client comparing two matches has no other way
+    # to know they were produced by different rules and are not comparable.
+    scorer_version: int
+    scored_at: datetime
+
+    # Flattened out of the stored breakdown blob rather than exposing it raw,
+    # so the JSONB shape stays an internal detail that can change without
+    # breaking the contract.
+    counts: MatchCounts
+    skills: list[MatchSkill]
+    weights: dict[str, float]
+    extraction_failed: bool
+
+    # Denormalized from the posting for display. A feed showing 50 matches
+    # would otherwise need 50 extra requests, or a join the client has to
+    # know to ask for.
+    posting_url: str | None = None
+    posting_title: str | None = None
+    posting_company: str | None = None

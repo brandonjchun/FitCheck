@@ -66,20 +66,22 @@ Seniority = Literal["junior", "mid", "senior", "staff", "unknown"]
 #        bump and a full re-score on top of the re-extraction.
 PROFILE_EXTRACTION_VERSION = 3
 
-# Job-posting extraction. Nothing writes this yet: M5 stores a posting's text
-# without extracting from it, and M7 is where the JD prompt lands.
+# Job-posting extraction (ExtractedPosting, below).
 #
-# Starting at 0 rather than 1 means "no posting has been extracted under any
-# version", so the first real prompt is version 1 and the sweep finds every
-# existing row without a special case for null.
+#   1 -- initial JD prompt and schema, M7.
 #
-# The open design question for M7, recorded here because this constant is
-# where it will bite: the spec says postings are extracted "using the same
-# schema" as resumes. That is worth challenging. A JD has *required* versus
-# *preferred* skills and a `min_years` threshold; a resume has years-per-skill
-# and education. Forcing both through ExtractedProfile makes each awkward, and
-# the skill-overlap scoring in section 8.3 reads required/preferred directly.
-POSTING_EXTRACTION_VERSION = 0
+# The design question recorded here at M5 has been answered: postings get
+# their own schema rather than reusing ExtractedProfile. The spec suggests
+# sharing one, and that is wrong for a reason that only shows up in the
+# scorer. A resume says "4 years of Python"; a job says "Python required,
+# 3+ years". Those are not the same field with different values -- one is a
+# possession and the other is a threshold, and section 8.3's overlap formula
+# reads `required` and `preferred` directly to weight them. Forced through
+# one schema, either every posting carries dead resume fields (education,
+# years-per-skill as a possession) or the necessity distinction has to be
+# recovered by parsing prose at scoring time, which is the regex resume
+# parsing that section 8.1 exists to forbid.
+POSTING_EXTRACTION_VERSION = 1
 
 
 # Where in the resume a skill was found. Ordered strongest to weakest, which
@@ -146,3 +148,80 @@ class ExtractedProfile(BaseModel):
     total_years_experience: float | None = None
     seniority: Seniority
     education: list[EducationItem]
+
+
+# --- Job postings -------------------------------------------------------
+#
+# The posting half of the contract. Everything below describes what a job
+# *demands*, where the resume models above describe what a candidate *has*.
+
+# Whether a posting treats a skill as a gate or a bonus.
+#
+# This is the field the whole scorer turns on. Section 8.3 weights required
+# above preferred, and the reason is that they answer different questions: a
+# missing required skill is usually disqualifying, a missing preferred one is
+# a rounding error. Scoring them alike is what produces a ranked feed full of
+# roles the candidate cannot actually get.
+#
+# "unknown" exists for the genuinely ambiguous case -- plenty of postings
+# list technologies in a paragraph with no signal either way -- and follows
+# the same reasoning as SkillItem.source: a required field with an explicit
+# escape hatch, never an optional one with a default.
+Necessity = Literal["required", "preferred", "unknown"]
+
+RemoteType = Literal["remote", "hybrid", "onsite", "unknown"]
+
+
+class PostingSkill(BaseModel):
+    """One skill a posting asks for, and how hard it asks."""
+
+    name: str = Field(
+        description="The skill as written in the posting, e.g. 'PostgreSQL'."
+    )
+    necessity: Necessity = Field(
+        description=(
+            "'required' if the posting treats this as a must-have (listed under "
+            "requirements, or worded as 'must have' / 'X+ years of'); "
+            "'preferred' if it is a nice-to-have (worded as 'preferred', "
+            "'bonus', 'a plus', 'desirable'); 'unknown' if the posting gives no "
+            "signal either way."
+        )
+    )
+    min_years: float | None = Field(
+        default=None,
+        description=(
+            "Minimum years this posting asks for in this specific skill, if it "
+            "states one. Null when the posting does not say. Do not infer a "
+            "number from the seniority of the role."
+        ),
+    )
+    evidence: str | None = Field(
+        default=None,
+        description=(
+            "The phrase from the posting supporting this requirement. Quote it "
+            "verbatim; do not paraphrase."
+        ),
+    )
+
+
+class ExtractedPosting(BaseModel):
+    """Everything we derive from a job posting's text.
+
+    Lands in job_postings.extracted (JSONB), with title, company, location,
+    remote_type, seniority, and min_years promoted to real columns -- the
+    same hybrid as profiles, and the columns already exist for it.
+
+    `min_years_experience` is the role-level threshold ("3+ years of backend
+    engineering") and is separate from any per-skill `min_years`. A posting
+    can state either, both, or neither, and they mean different things: one
+    gates the candidate, the other gates a single skill. Collapsing them
+    would make "5 years of Kubernetes" read as five years of total career.
+    """
+
+    title: str | None = None
+    company: str | None = None
+    location: str | None = None
+    remote_type: RemoteType
+    seniority: Seniority
+    min_years_experience: float | None = None
+    skills: list[PostingSkill]

@@ -25,10 +25,18 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.extraction import PROFILE_EXTRACTION_VERSION
-from app.models import IngestJob, JobPosting, Profile, canonical_key_for_url
+from app.embeddings import cosine_similarity, embed_text
+from app.extraction import POSTING_EXTRACTION_VERSION, PROFILE_EXTRACTION_VERSION
+from app.models import IngestJob, JobPosting, Match, Profile, canonical_key_for_url
 from app.providers import LLMError, LLMPermanentError
-from app.workers.extract import extract_profile
+from app.scoring import (
+    SCORER_VERSION,
+    SEMANTIC_WEIGHT,
+    SKILL_WEIGHT,
+    blend,
+    score_skills,
+)
+from app.workers.extract import extract_posting, extract_profile
 from app.workers.fetch import PermanentFetchError, fetch_posting_text
 
 logger = logging.getLogger(__name__)
@@ -117,7 +125,55 @@ def extract_profile_task(profile_id: int) -> str:
         profile.extraction_version = PROFILE_EXTRACTION_VERSION
         db.commit()
 
+    # Embedded after extraction rather than beside it, and deliberately not
+    # inside the same transaction. The two describe the resume for different
+    # consumers -- the blob feeds skill overlap, the vector feeds semantic
+    # similarity -- and only one of them costs an LLM call. If embedding
+    # fails, the extraction that was expensive to obtain is already durable,
+    # and `embedding IS NULL AND extracted IS NOT NULL` is a query that finds
+    # exactly what needs redoing.
+    _embed_profile(profile_id)
+
     return "extracted"
+
+
+def _embed_profile(profile_id: int) -> bool:
+    """Compute and store a profile's embedding. Returns whether it wrote one.
+
+    Idempotent by value: a profile that already has an embedding is left
+    alone. That is keyed on presence rather than on a version because the
+    embedding has no version of its own -- changing model bumps
+    SCORER_VERSION and requires a deliberate backfill, not an opportunistic
+    recompute inside whichever task happened to run next.
+    """
+    with _session() as db:
+        profile = db.get(Profile, profile_id)
+        if profile is None:
+            return False
+        if profile.embedding is not None:
+            return False
+        raw_text = profile.raw_text
+
+    # Outside the session for the same reason the LLM call is: model load is
+    # seconds on a cold worker, and inference is hundreds of milliseconds on
+    # a long document. Neither is worth a held connection.
+    try:
+        vector = embed_text(raw_text)
+    except ValueError:
+        # No embeddable text. Not an error worth retrying -- the upload path
+        # already rejects empty documents, so reaching here means the row
+        # predates that check.
+        logger.warning("_embed_profile: profile %s has no embeddable text", profile_id)
+        return False
+
+    with _session() as db:
+        profile = db.get(Profile, profile_id)
+        if profile is None or profile.embedding is not None:
+            return False
+        profile.embedding = vector
+        db.commit()
+
+    return True
 
 
 def process_job_url(job_id: int) -> str:
@@ -203,8 +259,63 @@ def process_job_url(job_id: int) -> str:
             job.last_error = None
             job.job_posting_id = posting_id
             db.commit()
+            profile_id = job.profile_id
+        else:
+            profile_id = None
+
+    if profile_id is not None:
+        _enqueue_scoring(profile_id, posting_id)
 
     return "fetched"
+
+
+def _enqueue_scoring(profile_id: int, posting_id: int) -> None:
+    """Hand the fetched posting to the scoring queue.
+
+    A separate queue rather than doing it inline, because the two halves have
+    opposite shapes: fetching waits on somebody else's server while holding
+    almost no CPU, and scoring is an LLM call plus local model inference.
+    Running them in one task means a 500-URL batch cannot start scoring
+    anything until it has finished fetching everything, and one slow model
+    stalls the fetches.
+
+    Enqueued *after* the commit above, so a worker picking this up
+    immediately finds a job row that says `succeeded` and a posting that
+    exists. The reverse order has a window where scoring reads a posting the
+    fetch has not committed yet -- the same ordering rule the API endpoints
+    follow.
+
+    A broker failure here is logged and swallowed. The fetch genuinely
+    succeeded and the posting is durable, so failing the job would discard
+    real work and, worse, hand it back to the retry policy -- which would
+    re-fetch a page we already have. `matches` missing a row is recoverable
+    by a sweep; a re-fetch is a request to a third party that cannot be taken
+    back.
+    """
+    from app.queues import (
+        FAILURE_TTL,
+        JOB_TIMEOUT,
+        QUEUE_SCORING,
+        RESULT_TTL,
+        get_queue,
+    )
+
+    try:
+        get_queue(QUEUE_SCORING).enqueue(
+            "app.workers.tasks.score_posting_for_profile",
+            profile_id,
+            posting_id,
+            job_timeout=JOB_TIMEOUT,
+            result_ttl=RESULT_TTL,
+            failure_ttl=FAILURE_TTL,
+        )
+    except Exception as exc:
+        logger.error(
+            "could not enqueue scoring for profile=%s posting=%s: %s",
+            profile_id,
+            posting_id,
+            exc,
+        )
 
 
 def _upsert_posting(url: str, raw_text: str) -> int:
@@ -280,3 +391,203 @@ def _record_failure(job_id: int, exc: Exception, permanent: bool = False) -> Non
         else:
             job.status = "failed"
         db.commit()
+
+
+def _prepare_posting(posting_id: int) -> str | None:
+    """Ensure a posting is extracted and embedded. Returns a failure reason.
+
+    Split out of the scoring task because the two halves are prerequisites
+    with different costs and different failure modes: extraction is an LLM
+    call that can fail permanently, embedding is local and effectively
+    cannot. Returning a reason rather than raising lets the caller decide --
+    scoring can still produce a semantic-only result when extraction is what
+    failed, which is a worse answer than a full one and a far better answer
+    than none.
+
+    Both steps are guarded, so a redelivered job pays for neither twice.
+    """
+    with _session() as db:
+        posting = db.get(JobPosting, posting_id)
+        if posting is None:
+            return "posting_missing"
+        needs_extraction = not posting.extraction_is_current
+        needs_embedding = posting.embedding is None
+        raw_text = posting.raw_text
+
+    if needs_extraction:
+        try:
+            extracted = extract_posting(raw_text)
+        except LLMPermanentError as exc:
+            logger.error("_prepare_posting: permanent failure for %s: %s", posting_id, exc)
+            return "extraction_permanent_failure"
+
+        with _session() as db:
+            posting = db.get(JobPosting, posting_id)
+            if posting is None:
+                return "posting_missing"
+            if not posting.extraction_is_current:
+                posting.extracted = extracted.model_dump(mode="json")
+                # Promoted columns, written in the same commit as the blob so
+                # the two cannot disagree about which extraction produced
+                # them. These are what M9's feed filters on.
+                posting.title = extracted.title
+                posting.company = extracted.company
+                posting.location = extracted.location
+                posting.remote_type = extracted.remote_type
+                posting.seniority = extracted.seniority
+                posting.min_years = extracted.min_years_experience
+                posting.extraction_version = POSTING_EXTRACTION_VERSION
+                db.commit()
+
+    if needs_embedding:
+        try:
+            vector = embed_text(raw_text)
+        except ValueError:
+            logger.warning("_prepare_posting: posting %s has no embeddable text", posting_id)
+            return "no_embeddable_text"
+
+        with _session() as db:
+            posting = db.get(JobPosting, posting_id)
+            if posting is None:
+                return "posting_missing"
+            if posting.embedding is None:
+                posting.embedding = vector
+                db.commit()
+
+    return None
+
+
+def score_posting_for_profile(
+    profile_id: int, posting_id: int, origin: str = "user_submission"
+) -> str:
+    """Score one posting against one profile and persist the match.
+
+    The task that completes Path A. Runs on the `scoring` queue rather than
+    beside the fetch, because the two have very different shapes: a fetch is
+    IO-bound waiting on somebody else's server, while this is an LLM call
+    plus local inference. Mixing them means a crawl backlog delays a user's
+    score, and a slow model delays the crawl.
+
+    Idempotent, keyed on `scorer_version` rather than on the match row
+    existing. A match scored under older weights is a match that needs
+    re-scoring, so an existence check would make a version bump unactionable
+    -- the same trap `extraction_is_current` avoids on the extraction side.
+    """
+    with _session() as db:
+        existing = (
+            db.query(Match)
+            .filter_by(profile_id=profile_id, job_posting_id=posting_id)
+            .one_or_none()
+        )
+        if existing is not None and existing.scorer_version == SCORER_VERSION:
+            logger.info(
+                "score_posting_for_profile: %s/%s already scored", profile_id, posting_id
+            )
+            return "already_done"
+
+    failure = _prepare_posting(posting_id)
+    if failure == "posting_missing":
+        return failure
+
+    # The profile may predate M7 and carry no vector. Cheap to check, and
+    # scoring without it would quietly contribute a zero semantic score to
+    # every match rather than announcing the gap.
+    _embed_profile(profile_id)
+
+    with _session() as db:
+        profile = db.get(Profile, profile_id)
+        posting = db.get(JobPosting, posting_id)
+        if profile is None or posting is None:
+            return "profile_or_posting_missing"
+
+        # Semantic similarity, or 0.0 when either side has no vector. Zero is
+        # the honest floor: it says "no evidence of thematic fit", which is
+        # what a missing embedding actually means, and the blend still
+        # produces a usable ranking from the skill half alone.
+        if profile.embedding is not None and posting.embedding is not None:
+            semantic = cosine_similarity(list(profile.embedding), list(posting.embedding))
+        else:
+            semantic = 0.0
+            logger.warning(
+                "score_posting_for_profile: %s/%s scored without an embedding",
+                profile_id,
+                posting_id,
+            )
+
+        # Both sides normalized on read, which is what makes the comparison
+        # work at all -- a resume saying "JS" and a posting saying
+        # "JavaScript" are one requirement only after the alias map.
+        breakdown = score_skills(posting.skills, profile.skills)
+        final = blend(semantic, breakdown.score)
+
+        payload = {
+            "semantic_score": round(semantic, 6),
+            "skill_score": round(breakdown.score, 6),
+            "final_score": round(final, 6),
+            "skills": [
+                {
+                    "name": v.name,
+                    "necessity": v.necessity,
+                    "bucket": v.bucket,
+                    "required_years": v.required_years,
+                    "candidate_years": v.candidate_years,
+                    "evidence": v.evidence,
+                }
+                for v in breakdown.verdicts
+            ],
+            "counts": {
+                "matched": len(breakdown.matched),
+                "partial": len(breakdown.partial),
+                "missing": len(breakdown.missing),
+                "missing_required": len(breakdown.missing_required),
+            },
+            # Stored in the row rather than read from the constants at display
+            # time, so an old match still explains itself under the weights it
+            # was actually scored with.
+            "weights": {"semantic": SEMANTIC_WEIGHT, "skill": SKILL_WEIGHT},
+            # True when the posting could not be extracted, so the skill half
+            # is empty and the score is semantic-only. Without this the UI
+            # would render a confident 0.4 with no skills listed and no way
+            # to tell that from a genuine total mismatch.
+            "extraction_failed": failure is not None,
+        }
+
+        # Upsert rather than insert. Re-scoring is normal -- a version bump, a
+        # re-extraction, a redelivered job -- and appending would put one
+        # posting in one feed twice at two different ranks.
+        statement = (
+            pg_insert(Match)
+            .values(
+                profile_id=profile_id,
+                job_posting_id=posting_id,
+                semantic_score=semantic,
+                skill_score=breakdown.score,
+                final_score=final,
+                breakdown=payload,
+                origin=origin,
+                scorer_version=SCORER_VERSION,
+            )
+            .on_conflict_do_update(
+                index_elements=["profile_id", "job_posting_id"],
+                set_={
+                    "semantic_score": semantic,
+                    "skill_score": breakdown.score,
+                    "final_score": final,
+                    "breakdown": payload,
+                    "scorer_version": SCORER_VERSION,
+                    "scored_at": func.now(),
+                },
+            )
+        )
+        db.execute(statement)
+        db.commit()
+
+    logger.info(
+        "scored %s/%s: semantic=%.3f skill=%.3f final=%.3f",
+        profile_id,
+        posting_id,
+        semantic,
+        breakdown.score,
+        final,
+    )
+    return "scored"

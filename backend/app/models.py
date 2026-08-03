@@ -23,11 +23,13 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import JSONB, REAL
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.extraction import PROFILE_EXTRACTION_VERSION
+from app.embeddings import EMBEDDING_DIM
+from app.extraction import POSTING_EXTRACTION_VERSION, PROFILE_EXTRACTION_VERSION
 from app.skills import normalize_skill_items
 
 # The job lifecycle from spec section 6.3. Stored as text rather than a
@@ -149,8 +151,18 @@ class Profile(Base):
     # to find them. See extraction.PROFILE_EXTRACTION_VERSION.
     extraction_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # embedding: vector(384) is added at M7, together with the pgvector
-    # SQLAlchemy type. The extension is available in the image already.
+    # The resume as a point in meaning-space, for the semantic half of
+    # scoring. 384 dimensions because that is what all-MiniLM-L6-v2 emits;
+    # the width is baked into the column, so changing model means rewriting
+    # this column and rebuilding every index on it.
+    #
+    # Not derived from `raw_text` directly -- see embeddings.embed_text. The
+    # model's context is 256 word pieces and a resume is several times that,
+    # so the text is chunked and pooled rather than silently truncated to its
+    # first fifth.
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=True
+    )
 
     # server_default means Postgres fills this in, not Python -- so rows
     # inserted by a migration or by psql get a timestamp too. timezone=True
@@ -367,12 +379,9 @@ class JobPosting(Base):
     # index on it. These five have a known shape, so there is nothing to guess
     # and no reason to make M7 ship a migration alongside its scoring code.
     #
-    # Two siblings are deliberately absent for exactly that reason. `source_id`
-    # is a foreign key to a `sources` table that does not exist until M8, so
-    # Postgres would refuse it outright. `embedding` needs pgvector enabled and
-    # a dimension, and the dimension depends on an embedding provider that is
-    # still undecided -- guessing vector(384) and then choosing a model with a
-    # different width is the expensive operation, on the widest column here.
+    # One sibling is still deliberately absent: `source_id`, a foreign key to
+    # a `sources` table that does not exist until M8, which Postgres would
+    # refuse outright.
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     company: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -387,6 +396,19 @@ class JobPosting(Base):
     # Numeric(4,1) mirrors profiles.years_experience, so a comparison between
     # what a posting demands and what a candidate has needs no cast.
     min_years: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
+
+    # The posting as a point in the same space as profiles.embedding. It has
+    # to be the same model and the same width or the two are not comparable
+    # -- vectors from different models are coordinates from different maps,
+    # and the arithmetic still runs, which is what makes it dangerous.
+    #
+    # The HNSW index over this column is M9's, not M7's, and it wants
+    # `WHERE closed_at IS NULL` baked into the index definition so closed
+    # postings are never retrieved rather than filtered afterwards. Building
+    # it now against an empty table would tune it on nothing.
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(EMBEDDING_DIM), nullable=True
+    )
 
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -421,6 +443,41 @@ class JobPosting(Base):
         sync and one of them will eventually be wrong.
         """
         return self.closed_at is None
+
+    @property
+    def skills(self) -> list[dict]:
+        """Requirements with canonical skill names, normalized on read.
+
+        The posting-side mirror of Profile.skills, and normalized the same
+        way for one reason above all: the scorer compares these two lists by
+        name. If a resume says "JS" and a posting says "JavaScript", the
+        overlap is only visible when both have passed through the same alias
+        map -- so normalizing one side and not the other would silently
+        report every such pair as a missing requirement.
+
+        `necessity`, `min_years`, and `evidence` carry through untouched.
+        """
+        if not self.extracted:
+            return []
+        return normalize_skill_items(self.extracted.get("skills", []))
+
+    @property
+    def extraction_ok(self) -> bool:
+        return self.extracted is not None
+
+    @property
+    def extraction_is_current(self) -> bool:
+        """Whether `extracted` was produced by the current posting prompt.
+
+        Keyed on the version rather than on presence, matching the resume
+        path: a posting extracted under an older prompt *has* an extraction
+        and still needs a new one, so a presence check would make a version
+        bump unactionable.
+        """
+        return (
+            self.extracted is not None
+            and self.extraction_version == POSTING_EXTRACTION_VERSION
+        )
 
     def __repr__(self) -> str:
         return f"<JobPosting id={self.id} url={self.url!r}>"
@@ -530,3 +587,85 @@ class IngestJob(Base):
 
     def __repr__(self) -> str:
         return f"<IngestJob id={self.id} status={self.status!r} url={self.url!r}>"
+
+
+# Where a match came from. Both paths write the same table with the same
+# scorer -- the difference is only who asked. A user submitting a URL gets
+# `user_submission`; M9's scheduled scoring gets `recommendation`.
+#
+# Worth keeping distinct even though nothing branches on it yet: "postings
+# you asked about" and "postings we suggested" are different products from
+# the user's side, and a feed that silently mixes them reads as the system
+# recommending something the user already found themselves.
+MatchOrigin = Literal["user_submission", "recommendation"]
+
+
+class Match(Base):
+    """One scored (profile, posting) pair, with the reasoning kept.
+
+    The row every path converges on. Path A writes one when a user submits a
+    URL; M9's recommender writes the top 50 per profile from the same scorer
+    over the same columns.
+
+    `breakdown` is not decoration. A ranked feed whose only output is a
+    number cannot be argued with, and spec section 8.4 requires both
+    sub-scores and the skill accounting to be surfaced -- so the thing that
+    justifies the rank is stored beside it rather than recomputed on read,
+    which would silently change as the alias map grows.
+    """
+
+    __tablename__ = "matches"
+    __table_args__ = (
+        # One score per pair. Re-scoring updates in place rather than
+        # appending, so the feed cannot show the same posting twice at two
+        # different ranks -- which is what an append-only history would do
+        # the first time anything re-scored.
+        UniqueConstraint(
+            "profile_id", "job_posting_id", name="matches_profile_posting_uniq"
+        ),
+        # The feed query, exactly: this profile's matches, best first. A
+        # composite index in this order serves both the filter and the sort,
+        # so the planner never sorts the result set.
+        Index("matches_feed_idx", "profile_id", text("final_score DESC")),
+        Index("ix_matches_job_posting_id", "job_posting_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    profile_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    # CASCADE here too, but note it should almost never fire: a closed posting
+    # is tombstoned with `closed_at`, never deleted, precisely so a user's
+    # match history survives the role being filled.
+    job_posting_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # `real` per the spec rather than double precision. These are similarity
+    # scores in [0, 1] from a model whose own output is float32 -- storing
+    # them at double width would be four bytes of false precision per column
+    # on the table that grows fastest (profiles x postings).
+    semantic_score: Mapped[float] = mapped_column(REAL, nullable=False)
+    skill_score: Mapped[float] = mapped_column(REAL, nullable=False)
+    final_score: Mapped[float] = mapped_column(REAL, nullable=False)
+
+    breakdown: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Which rules produced these numbers. A feed sorted across two generations
+    # is silently wrong -- position 3 beats position 4 because it was scored
+    # under different weights, not because it fits better. See
+    # scoring.SCORER_VERSION.
+    scorer_version: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    scored_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Match profile={self.profile_id} posting={self.job_posting_id} "
+            f"score={self.final_score:.3f}>"
+        )
