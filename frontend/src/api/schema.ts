@@ -419,6 +419,18 @@ export interface paths {
          *     profile, which is a subtly worse answer: it says "this profile has no
          *     matches" where the truth is "this profile is not yours", and a client
          *     cannot tell an empty feed from a forbidden one.
+         *
+         *     **The filters here are not the ones in `retrieval.FeedFilters`, and the
+         *     duplication is deliberate.** Those run at recall time and decide what gets
+         *     *scored*; these run at read time and decide what gets *shown*. Collapsing
+         *     them would mean re-running a 200-candidate rerank every time somebody
+         *     ticked "remote only", which is a scoring job's worth of work on the
+         *     request path -- exactly what section 6.9 puts on a queue instead.
+         *
+         *     **Closed postings are hidden by default rather than deleted from the
+         *     feed.** A role filled after it was scored is still a true record of what
+         *     was recommended, and `include_closed` keeps it reachable; showing it
+         *     unasked would be presenting a dead link as a live opportunity.
          */
         get: operations["list_matches_api_matches_get"];
         put?: never;
@@ -447,6 +459,41 @@ export interface paths {
         get: operations["get_match_api_matches__match_id__get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/matches/{match_id}/feedback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit Feedback
+         * @description Record what the caller thought of a recommendation.
+         *
+         *     Section 8.6's data collection. Nothing reads this yet -- the blend weights
+         *     stay hand-set this semester -- and collecting it anyway is the point: a
+         *     label cannot be gathered retroactively, so the cost of starting late is
+         *     the whole dataset.
+         *
+         *     **201 with a new row on every call, including a repeat.** The table is
+         *     append-only, so marking a posting `interested` and later `applied` records
+         *     both, in order. That sequence is the funnel, and it is exactly what a
+         *     later ranking model would learn from; an upsert keyed on the match would
+         *     quietly discard it.
+         *
+         *     Ownership joins through `profiles` for the same reason `get_match` does:
+         *     a match belonging to somebody else must be indistinguishable from one that
+         *     does not exist, or this endpoint becomes a way to enumerate match ids.
+         */
+        post: operations["submit_feedback_api_matches__match_id__feedback_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -640,6 +687,64 @@ export interface components {
             /** Source */
             source?: ("experience" | "project" | "education" | "skills_list" | "unknown") | null;
         };
+        /**
+         * FeedbackCreate
+         * @description A user's judgment on one recommendation.
+         *
+         *     The verdict is a Literal rather than a plain string so an unknown value is
+         *     a 422 naming the alternatives, produced before the request reaches a
+         *     handler. The database column is deliberately unconstrained text -- see
+         *     `MatchFeedback` -- which puts the vocabulary in exactly one place that can
+         *     explain itself to a caller.
+         */
+        FeedbackCreate: {
+            /**
+             * Verdict
+             * @enum {string}
+             */
+            verdict: "interested" | "not_interested" | "applied";
+        };
+        /**
+         * FeedbackResponse
+         * @description A recorded label.
+         *
+         *     Returns the row rather than an empty 201 so the client has the id and the
+         *     server's `created_at`, which is what orders the funnel. A client that
+         *     stamped its own time would be recording clock skew as sequence.
+         */
+        FeedbackResponse: {
+            /** Id */
+            id: number;
+            /** Match Id */
+            match_id: number;
+            /** Verdict */
+            verdict: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
+        /**
+         * GateStats
+         * @description Content-hash gate effectiveness.
+         *
+         *     The measurement spec section 6.7 asks to be *reported* rather than
+         *     asserted. Counters are process-lifetime and unpartitioned, so this mixes a
+         *     board's first crawl -- where every posting is necessarily a miss -- with
+         *     the steady-state re-crawls the number is actually about. Read it as a
+         *     floor on the gate's value, not as the steady-state rate.
+         */
+        GateStats: {
+            /** Hits */
+            hits: number;
+            /** Misses */
+            misses: number;
+            /** Total */
+            total: number;
+            /** Hit Rate */
+            hit_rate: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -820,6 +925,9 @@ export interface components {
             result_ttl_seconds: number;
             /** Failure Ttl Seconds */
             failure_ttl_seconds: number;
+            /** Sources */
+            sources: components["schemas"]["SourceFreshness"][];
+            gate: components["schemas"]["GateStats"];
         };
         /**
          * ProfileSummary
@@ -953,6 +1061,45 @@ export interface components {
             status: string;
             /** Queue */
             queue: string;
+        };
+        /**
+         * SourceFreshness
+         * @description How current one board's slice of the catalog is.
+         *
+         *     `last_success_at` is the honest freshness figure and `last_crawled_at` is
+         *     not: a source that has been attempted every hour and succeeded once last
+         *     week looks perfectly healthy on the second column alone. Both are exposed
+         *     so the gap between them is visible, because that gap *is* the failure --
+         *     a crawler that runs on schedule and returns nothing produces a catalog
+         *     that ages while every dashboard says it is being tended.
+         */
+        SourceFreshness: {
+            /** Id */
+            id: number;
+            /** Kind */
+            kind: string;
+            /** Board Token */
+            board_token: string;
+            /** Display Name */
+            display_name: string;
+            /** Enabled */
+            enabled: boolean;
+            /** Crawl Interval Seconds */
+            crawl_interval_seconds: number;
+            /** Last Crawled At */
+            last_crawled_at?: string | null;
+            /** Last Success At */
+            last_success_at?: string | null;
+            /** Consecutive Failures */
+            consecutive_failures: number;
+            /** Circuit Open */
+            circuit_open: boolean;
+            /** Seconds Since Success */
+            seconds_since_success?: number | null;
+            /** Is Stale */
+            is_stale: boolean;
+            /** Open Postings */
+            open_postings: number;
         };
         /** StatusCount */
         StatusCount: {
@@ -1526,6 +1673,11 @@ export interface operations {
             query: {
                 profile_id: number;
                 limit?: number;
+                origin?: string | null;
+                remote_only?: boolean;
+                seniority?: string[] | null;
+                max_min_years?: number | null;
+                include_closed?: boolean;
             };
             header?: never;
             path?: never;
@@ -1571,6 +1723,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MatchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_feedback_api_matches__match_id__feedback_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                match_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FeedbackCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FeedbackResponse"];
                 };
             };
             /** @description Validation Error */

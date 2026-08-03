@@ -5,6 +5,7 @@ import {
   opsApi,
   type DeadLetterItem,
   type QueueHealth,
+  type SourceFreshness,
   type WorkerInfo,
 } from "../api/client";
 import { useMe } from "../hooks/useAuth";
@@ -103,6 +104,69 @@ function QueueCard({ queue }: { queue: QueueHealth }) {
 }
 
 /* --- Workers ---------------------------------------------------------- */
+
+/** A rate in [0,1] as a percentage. */
+function pctOf(rate: number): string {
+  return `${Math.round(rate * 100)}%`;
+}
+
+/**
+ * Age as something a human reads at a glance.
+ *
+ * Deliberately coarse. "3h" is what the operator acts on; the extra precision
+ * of "3h 14m 02s" is noise on a panel whose whole job is to be scannable.
+ */
+function humanAge(seconds: number): string {
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
+function SourceRow({ source }: { source: SourceFreshness }) {
+  /* Three states, most severe first. An open circuit outranks staleness
+   * because it explains it: a board that has failed five times running is
+   * stale *because* it is broken, and showing "stale" alone would send
+   * somebody looking for a scheduling problem that is not there. */
+  const tone = source.circuit_open
+    ? "bad"
+    : !source.enabled
+      ? "off"
+      : source.is_stale
+        ? "warn"
+        : "ok";
+
+  const status = source.circuit_open
+    ? `Circuit open — ${source.consecutive_failures} consecutive failures`
+    : !source.enabled
+      ? "Disabled"
+      : source.seconds_since_success == null
+        ? "Never crawled successfully"
+        : source.is_stale
+          ? `Stale — last success ${humanAge(source.seconds_since_success)}`
+          : `Fresh — ${humanAge(source.seconds_since_success)}`;
+
+  return (
+    <li className={`source-row tone-${tone}`}>
+      <span className="source-dot" aria-hidden="true" />
+
+      <div className="source-id">
+        <strong>{source.display_name}</strong>
+        <span className="source-token">
+          {source.kind}:{source.board_token}
+        </span>
+      </div>
+
+      <span className="source-status">{status}</span>
+
+      <span className="source-count">
+        {source.open_postings} open
+      </span>
+    </li>
+  );
+}
 
 function WorkerRow({ worker }: { worker: WorkerInfo }) {
   return (
@@ -294,6 +358,36 @@ export function Dashboard() {
                   <QueueCard key={q.name} queue={q} />
                 ))}
               </ul>
+            </section>
+
+            <section className="dash-section">
+              <h2 className="dash-h2">Sources</h2>
+              <p className="dash-note">
+                Freshness is measured from the last <em>successful</em> crawl,
+                not the last attempt. A board that is polled on schedule and
+                fails every time keeps a recent attempt while its postings go
+                stale.
+                {data.gate.total > 0 && (
+                  <>
+                    {" "}
+                    Content-hash gate: {pctOf(data.gate.hit_rate)} of{" "}
+                    {data.gate.total} ingests skipped re-processing.
+                  </>
+                )}
+              </p>
+
+              {data.sources.length === 0 ? (
+                <p className="dash-empty">
+                  No sources configured. Seed them with{" "}
+                  <code>python scripts/seed_sources.py</code>.
+                </p>
+              ) : (
+                <ul className="source-list">
+                  {data.sources.map((s) => (
+                    <SourceRow key={s.id} source={s} />
+                  ))}
+                </ul>
+              )}
             </section>
 
             <section className="dash-section">

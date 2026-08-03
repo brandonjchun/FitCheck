@@ -689,7 +689,7 @@
           "matches"
         ],
         "summary": "List Matches",
-        "description": "Matches for one of the caller's profiles, best first.\n\nThis is the query `matches_feed_idx` exists for -- `(profile_id,\nfinal_score DESC)` serves both the filter and the ordering, so the\nplanner never sorts.\n\nOwnership is checked on the *profile* rather than filtered on the\nmatches. Filtering alone would return an empty list for someone else's\nprofile, which is a subtly worse answer: it says \"this profile has no\nmatches\" where the truth is \"this profile is not yours\", and a client\ncannot tell an empty feed from a forbidden one.",
+        "description": "Matches for one of the caller's profiles, best first.\n\nThis is the query `matches_feed_idx` exists for -- `(profile_id,\nfinal_score DESC)` serves both the filter and the ordering, so the\nplanner never sorts.\n\nOwnership is checked on the *profile* rather than filtered on the\nmatches. Filtering alone would return an empty list for someone else's\nprofile, which is a subtly worse answer: it says \"this profile has no\nmatches\" where the truth is \"this profile is not yours\", and a client\ncannot tell an empty feed from a forbidden one.\n\n**The filters here are not the ones in `retrieval.FeedFilters`, and the\nduplication is deliberate.** Those run at recall time and decide what gets\n*scored*; these run at read time and decide what gets *shown*. Collapsing\nthem would mean re-running a 200-candidate rerank every time somebody\nticked \"remote only\", which is a scoring job's worth of work on the\nrequest path -- exactly what section 6.9 puts on a queue instead.\n\n**Closed postings are hidden by default rather than deleted from the\nfeed.** A role filled after it was scored is still a true record of what\nwas recommended, and `include_closed` keeps it reachable; showing it\nunasked would be presenting a dead link as a live opportunity.",
         "operationId": "list_matches_api_matches_get",
         "parameters": [
           {
@@ -711,6 +711,78 @@
               "minimum": 1,
               "default": 25,
               "title": "Limit"
+            }
+          },
+          {
+            "name": "origin",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Origin"
+            }
+          },
+          {
+            "name": "remote_only",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Remote Only"
+            }
+          },
+          {
+            "name": "seniority",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Seniority"
+            }
+          },
+          {
+            "name": "max_min_years",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Max Min Years"
+            }
+          },
+          {
+            "name": "include_closed",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Closed"
             }
           }
         ],
@@ -768,6 +840,59 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/MatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/matches/{match_id}/feedback": {
+      "post": {
+        "tags": [
+          "matches"
+        ],
+        "summary": "Submit Feedback",
+        "description": "Record what the caller thought of a recommendation.\n\nSection 8.6's data collection. Nothing reads this yet -- the blend weights\nstay hand-set this semester -- and collecting it anyway is the point: a\nlabel cannot be gathered retroactively, so the cost of starting late is\nthe whole dataset.\n\n**201 with a new row on every call, including a repeat.** The table is\nappend-only, so marking a posting `interested` and later `applied` records\nboth, in order. That sequence is the funnel, and it is exactly what a\nlater ranking model would learn from; an upsert keyed on the match would\nquietly discard it.\n\nOwnership joins through `profiles` for the same reason `get_match` does:\na match belonging to somebody else must be indistinguishable from one that\ndoes not exist, or this endpoint becomes a way to enumerate match ids.",
+        "operationId": "submit_feedback_api_matches__match_id__feedback_post",
+        "parameters": [
+          {
+            "name": "match_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Match Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackResponse"
                 }
               }
             }
@@ -1145,6 +1270,84 @@
         ],
         "title": "ExtractedSkill",
         "description": "A skill as surfaced to clients -- canonical name plus its evidence."
+      },
+      "FeedbackCreate": {
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "interested",
+              "not_interested",
+              "applied"
+            ],
+            "title": "Verdict"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verdict"
+        ],
+        "title": "FeedbackCreate",
+        "description": "A user's judgment on one recommendation.\n\nThe verdict is a Literal rather than a plain string so an unknown value is\na 422 naming the alternatives, produced before the request reaches a\nhandler. The database column is deliberately unconstrained text -- see\n`MatchFeedback` -- which puts the vocabulary in exactly one place that can\nexplain itself to a caller."
+      },
+      "FeedbackResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "match_id": {
+            "type": "integer",
+            "title": "Match Id"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "match_id",
+          "verdict",
+          "created_at"
+        ],
+        "title": "FeedbackResponse",
+        "description": "A recorded label.\n\nReturns the row rather than an empty 201 so the client has the id and the\nserver's `created_at`, which is what orders the funnel. A client that\nstamped its own time would be recording clock skew as sequence."
+      },
+      "GateStats": {
+        "properties": {
+          "hits": {
+            "type": "integer",
+            "title": "Hits"
+          },
+          "misses": {
+            "type": "integer",
+            "title": "Misses"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "hit_rate": {
+            "type": "number",
+            "title": "Hit Rate"
+          }
+        },
+        "type": "object",
+        "required": [
+          "hits",
+          "misses",
+          "total",
+          "hit_rate"
+        ],
+        "title": "GateStats",
+        "description": "Content-hash gate effectiveness.\n\nThe measurement spec section 6.7 asks to be *reported* rather than\nasserted. Counters are process-lifetime and unpartitioned, so this mixes a\nboard's first crawl -- where every posting is necessarily a miss -- with\nthe steady-state re-crawls the number is actually about. Read it as a\nfloor on the gate's value, not as the steady-state rate."
       },
       "HTTPValidationError": {
         "properties": {
@@ -1524,6 +1727,16 @@
           "failure_ttl_seconds": {
             "type": "integer",
             "title": "Failure Ttl Seconds"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceFreshness"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "gate": {
+            "$ref": "#/components/schemas/GateStats"
           }
         },
         "type": "object",
@@ -1533,7 +1746,9 @@
           "jobs_by_status",
           "job_timeout_seconds",
           "result_ttl_seconds",
-          "failure_ttl_seconds"
+          "failure_ttl_seconds",
+          "sources",
+          "gate"
         ],
         "title": "OpsOverview",
         "description": "Everything the dashboard polls, in one response."
@@ -1787,6 +2002,100 @@
           "queue"
         ],
         "title": "RequeueResponse"
+      },
+      "SourceFreshness": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "board_token": {
+            "type": "string",
+            "title": "Board Token"
+          },
+          "display_name": {
+            "type": "string",
+            "title": "Display Name"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled"
+          },
+          "crawl_interval_seconds": {
+            "type": "integer",
+            "title": "Crawl Interval Seconds"
+          },
+          "last_crawled_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Crawled At"
+          },
+          "last_success_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Success At"
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "title": "Consecutive Failures"
+          },
+          "circuit_open": {
+            "type": "boolean",
+            "title": "Circuit Open"
+          },
+          "seconds_since_success": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seconds Since Success"
+          },
+          "is_stale": {
+            "type": "boolean",
+            "title": "Is Stale"
+          },
+          "open_postings": {
+            "type": "integer",
+            "title": "Open Postings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "board_token",
+          "display_name",
+          "enabled",
+          "crawl_interval_seconds",
+          "consecutive_failures",
+          "circuit_open",
+          "is_stale",
+          "open_postings"
+        ],
+        "title": "SourceFreshness",
+        "description": "How current one board's slice of the catalog is.\n\n`last_success_at` is the honest freshness figure and `last_crawled_at` is\nnot: a source that has been attempted every hour and succeeded once last\nweek looks perfectly healthy on the second column alone. Both are exposed\nso the gap between them is visible, because that gap *is* the failure --\na crawler that runs on schedule and returns nothing produces a catalog\nthat ages while every dashboard says it is being tended."
       },
       "StatusCount": {
         "properties": {

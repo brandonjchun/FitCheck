@@ -1,6 +1,13 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { errorMessage, matchApi, type Match, type MatchSkill } from "../api/client";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  errorMessage,
+  matchApi,
+  type FeedbackVerdict,
+  type FeedFilters,
+  type Match,
+  type MatchSkill,
+} from "../api/client";
 import "./MatchFeed.css";
 
 /* Scoring runs asynchronously after a fetch succeeds, so a match appears some
@@ -9,6 +16,11 @@ import "./MatchFeed.css";
  * relaxed interval rather than trying to guess when it is finished. The query
  * is capped at 25 rows and served by `matches_feed_idx`, so it is cheap. */
 const MATCH_POLL_MS = 5000;
+
+/* Once the feed has rows, it is a precomputed resource: scores change when a
+ * posting is re-fetched or the recommender runs, neither of which happens on
+ * a five-second cadence. §7.3 option 1, final. */
+const FEED_STALE_MS = 5 * 60_000;
 
 /** Scores are cosine-blended into [0, 1]. Shown as a percentage. */
 function pct(score: number): string {
@@ -56,6 +68,74 @@ function SkillRow({ skill }: { skill: MatchSkill }) {
         * to is unfalsifiable, which is the whole argument for storing this. */}
       {skill.evidence && <q className="mf-skill-evidence">{skill.evidence}</q>}
     </li>
+  );
+}
+
+/**
+ * Feedback capture for one match.
+ *
+ * Records rather than toggles. The table is append-only, so pressing
+ * "Interested" and later "Applied" states two true things in order — which is
+ * the funnel a ranking model would eventually learn from. Rendering these as
+ * mutually-exclusive radio buttons would throw that sequence away in the UI
+ * even though the API preserves it.
+ *
+ * Nothing here re-ranks anything today, and the label says so: promising the
+ * user their feedback improves results, when no model reads it this semester,
+ * would be a lie the interface tells on the system's behalf.
+ */
+function FeedbackButtons({ matchId }: { matchId: number }) {
+  const [sent, setSent] = useState<FeedbackVerdict | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  const record = useMutation({
+    mutationFn: (verdict: FeedbackVerdict) => matchApi.feedback(matchId, verdict),
+    onMutate: (verdict) => {
+      setFailed(false);
+      setSent(verdict);
+    },
+    /* Reverted on failure rather than left showing a confirmation. A label
+     * that never reached the server is exactly the data loss this feature
+     * exists to prevent, so it must not look like it succeeded. */
+    onError: () => {
+      setSent(null);
+      setFailed(true);
+    },
+  });
+
+  const options: Array<{ verdict: FeedbackVerdict; label: string }> = [
+    { verdict: "interested", label: "Interested" },
+    { verdict: "not_interested", label: "Not for me" },
+    { verdict: "applied", label: "Applied" },
+  ];
+
+  return (
+    <div className="mf-feedback">
+      <span className="mf-feedback-label">Was this a good match?</span>
+
+      {options.map(({ verdict, label }) => (
+        <button
+          key={verdict}
+          type="button"
+          className={`btn btn-ghost btn-sm mf-verdict${sent === verdict ? " is-sent" : ""}`}
+          disabled={record.isPending}
+          onClick={() => record.mutate(verdict)}
+        >
+          {label}
+        </button>
+      ))}
+
+      {sent && (
+        <span className="mf-feedback-ack" role="status">
+          Recorded — thanks.
+        </span>
+      )}
+      {failed && (
+        <span className="form-error" role="alert">
+          Could not record that. Try again.
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -159,15 +239,97 @@ function MatchCard({ match, rank }: { match: Match; rank: number }) {
           )}
         </>
       )}
+
+      <FeedbackButtons matchId={match.id} />
     </li>
   );
 }
 
+/** The filter bar. Controlled from the parent so the query key can include it. */
+function FilterBar({
+  filters,
+  onChange,
+}: {
+  filters: FeedFilters;
+  onChange: (next: FeedFilters) => void;
+}) {
+  const set = (patch: Partial<FeedFilters>) => onChange({ ...filters, ...patch });
+
+  return (
+    <div className="mf-filters" role="group" aria-label="Feed filters">
+      <label className="mf-filter">
+        <span>Source</span>
+        <select
+          value={filters.origin ?? ""}
+          onChange={(e) =>
+            set({ origin: (e.target.value || undefined) as FeedFilters["origin"] })
+          }
+        >
+          <option value="">All</option>
+          <option value="recommendation">Recommended</option>
+          <option value="user_submission">Submitted by me</option>
+        </select>
+      </label>
+
+      <label className="mf-filter">
+        <span>Seniority</span>
+        <select
+          value={filters.seniority?.[0] ?? ""}
+          onChange={(e) =>
+            set({ seniority: e.target.value ? [e.target.value] : undefined })
+          }
+        >
+          <option value="">Any</option>
+          <option value="junior">Junior</option>
+          <option value="mid">Mid</option>
+          <option value="senior">Senior</option>
+          <option value="staff">Staff</option>
+        </select>
+      </label>
+
+      <label className="mf-filter mf-filter-check">
+        <input
+          type="checkbox"
+          checked={filters.remote_only ?? false}
+          onChange={(e) => set({ remote_only: e.target.checked || undefined })}
+        />
+        <span>Remote only</span>
+      </label>
+
+      {/* Closed roles are hidden by default rather than dropped: a filled
+        * posting is still a true record of what was recommended, and the
+        * toggle keeps it reachable without presenting a dead link as live. */}
+      <label className="mf-filter mf-filter-check">
+        <input
+          type="checkbox"
+          checked={filters.include_closed ?? false}
+          onChange={(e) => set({ include_closed: e.target.checked || undefined })}
+        />
+        <span>Include closed</span>
+      </label>
+    </div>
+  );
+}
+
 export function MatchFeed({ profileId }: { profileId: number }) {
+  const [filters, setFilters] = useState<FeedFilters>({});
+
   const matches = useQuery({
-    queryKey: ["matches", profileId],
-    queryFn: () => matchApi.list(profileId, 25),
-    refetchInterval: MATCH_POLL_MS,
+    /* Filters belong in the key. Without them React Query would serve the
+     * previous filter's rows from cache while the new request is in flight,
+     * so the list would briefly contradict the controls that produced it. */
+    queryKey: ["matches", profileId, filters],
+    queryFn: () => matchApi.list(profileId, 25, filters),
+    /* Path B's feed is precomputed and does not change second to second, so
+     * §7.3 drops the 5s poll here in favour of a stale time plus a refetch
+     * when the window regains focus. Polling a precomputed resource every two
+     * seconds is pure waste; the case for the old interval was Path A, where
+     * a score genuinely appears seconds after a submission. That case is kept
+     * alive by `refetchInterval` staying on only while nothing has arrived. */
+    staleTime: FEED_STALE_MS,
+    refetchOnWindowFocus: true,
+    refetchInterval: (query) =>
+      (query.state.data?.length ?? 0) === 0 ? MATCH_POLL_MS : false,
   });
 
   const rows = matches.data ?? [];
@@ -178,17 +340,24 @@ export function MatchFeed({ profileId }: { profileId: number }) {
    * The API exposes the version precisely so a client can say so. */
   const versions = new Set(rows.map((m) => m.scorer_version));
 
+  /* An empty feed means something different once a filter is on, and saying
+   * "submit a posting URL" to somebody who has fifty matches and ticked
+   * "remote only" is advice for a problem they do not have. */
+  const hasFilters = Object.values(filters).some((v) => v !== undefined);
+
   return (
     <div className="panel card">
       <div className="panel-head">
         <div>
           <h3>Matches</h3>
           <p className="panel-meta">
-            Every posting you have submitted, scored against this resume, best
-            first.
+            Postings you submitted and postings we found, scored against this
+            resume, best first.
           </p>
         </div>
       </div>
+
+      <FilterBar filters={filters} onChange={setFilters} />
 
       {matches.isError && (
         <p className="form-error" role="alert">
@@ -213,7 +382,9 @@ export function MatchFeed({ profileId }: { profileId: number }) {
         <p className="panel-empty">
           {matches.isLoading
             ? "Loading…"
-            : "No scores yet. Submit a posting URL above — once it is fetched, it is scored against this resume automatically and appears here."}
+            : hasFilters
+              ? "No matches fit those filters. Widen them to see more."
+              : "No scores yet. Submit a posting URL above — once it is fetched, it is scored against this resume automatically and appears here."}
         </p>
       )}
     </div>

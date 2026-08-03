@@ -38,6 +38,9 @@ export type SkillBucket = MatchSkill["bucket"];
 
 export type OpsOverview = components["schemas"]["OpsOverview"];
 export type QueueHealth = components["schemas"]["QueueHealth"];
+export type SourceFreshness = components["schemas"]["SourceFreshness"];
+export type Feedback = components["schemas"]["FeedbackResponse"];
+export type FeedbackVerdict = components["schemas"]["FeedbackCreate"]["verdict"];
 export type WorkerInfo = components["schemas"]["WorkerInfo"];
 export type DeadLetterItem = components["schemas"]["DeadLetterItem"];
 
@@ -151,16 +154,39 @@ export const batchApi = {
     api.get<Batch[]>("/api/batches", { params: { limit } }).then((r) => r.data),
 };
 
+/** Read-time feed filters. Every field optional; omitted means "don't care". */
+export type FeedFilters = {
+  origin?: "user_submission" | "recommendation";
+  remote_only?: boolean;
+  seniority?: string[];
+  max_min_years?: number;
+  include_closed?: boolean;
+};
+
 export const matchApi = {
   /* Keyed on the profile, not the job. A match is a (profile, posting) pair,
    * so the same posting scored against two of your resumes is two matches --
    * which is the point of keeping several versions around. */
-  list: (profileId: number, limit = 25) =>
+  list: (profileId: number, limit = 25, filters: FeedFilters = {}) =>
     api
-      .get<Match[]>("/api/matches", { params: { profile_id: profileId, limit } })
+      .get<Match[]>("/api/matches", {
+        params: { profile_id: profileId, limit, ...filters },
+        /* Repeat the key per value -- `seniority=senior&seniority=staff` --
+         * because that is what FastAPI's `list[str]` query parameter reads.
+         * Axios would otherwise send `seniority[]=senior`, which arrives as a
+         * differently-named parameter and is silently ignored. */
+        paramsSerializer: { indexes: null },
+      })
       .then((r) => r.data),
 
   get: (id: number) => api.get<Match>(`/api/matches/${id}`).then((r) => r.data),
+
+  /* Append-only: every call records a new verdict rather than replacing the
+   * last one, so interested-then-applied is preserved as a sequence. */
+  feedback: (matchId: number, verdict: FeedbackVerdict) =>
+    api
+      .post<Feedback>(`/api/matches/${matchId}/feedback`, { verdict })
+      .then((r) => r.data),
 };
 
 export const opsApi = {

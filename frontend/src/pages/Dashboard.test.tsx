@@ -44,6 +44,26 @@ const overview = (over: Partial<Record<string, unknown>> = {}) => ({
   job_timeout_seconds: 120,
   result_ttl_seconds: 3600,
   failure_ttl_seconds: 604800,
+  sources: [],
+  gate: { hits: 0, misses: 0, total: 0, hit_rate: 0 },
+  ...over,
+});
+
+/** One source row, with the freshness columns overridable per test. */
+const source = (over: Partial<Record<string, unknown>> = {}) => ({
+  id: 1,
+  kind: "lever",
+  board_token: "acme",
+  display_name: "Acme",
+  enabled: true,
+  crawl_interval_seconds: 3600,
+  last_crawled_at: null,
+  last_success_at: null,
+  consecutive_failures: 0,
+  circuit_open: false,
+  seconds_since_success: null,
+  is_stale: true,
+  open_postings: 0,
   ...over,
 });
 
@@ -264,5 +284,82 @@ describe("policy footnote", () => {
 
     expect(await screen.findByText(/job timeout 300s/i)).toBeInTheDocument();
     expect(screen.getByText(/results kept 2h/i)).toBeInTheDocument();
+  });
+});
+
+/* --- source freshness -------------------------------------------------- */
+
+describe("sources", () => {
+  it("reports a recent success as fresh", async () => {
+    vi.mocked(opsApi.overview).mockResolvedValue(
+      overview({
+        sources: [source({ seconds_since_success: 120, is_stale: false })],
+      }) as never,
+    );
+    draw();
+
+    expect(await screen.findByText(/fresh — 2m ago/i)).toBeInTheDocument();
+  });
+
+  it("reports a source that has never succeeded rather than calling it fresh", async () => {
+    /* Unknown age must not read as healthy — otherwise the board that has
+     * never once worked is the one the dashboard is quietest about. */
+    vi.mocked(opsApi.overview).mockResolvedValue(
+      overview({ sources: [source()] }) as never,
+    );
+    draw();
+
+    expect(await screen.findByText(/never crawled successfully/i)).toBeInTheDocument();
+  });
+
+  it("says circuit open rather than stale when a board is broken", async () => {
+    /* The circuit explains the staleness. Reporting "stale" alone sends the
+     * reader looking for a scheduling problem that is not there. */
+    vi.mocked(opsApi.overview).mockResolvedValue(
+      overview({
+        sources: [
+          source({
+            circuit_open: true,
+            consecutive_failures: 5,
+            is_stale: true,
+            seconds_since_success: 90000,
+          }),
+        ],
+      }) as never,
+    );
+    draw();
+
+    expect(await screen.findByText(/circuit open/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^stale/i)).not.toBeInTheDocument();
+  });
+
+  it("marks a stale source without dressing it as a failure", async () => {
+    vi.mocked(opsApi.overview).mockResolvedValue(
+      overview({
+        sources: [source({ is_stale: true, seconds_since_success: 90000 })],
+      }) as never,
+    );
+    draw();
+
+    expect(await screen.findByText(/stale — last success 25h ago/i)).toBeInTheDocument();
+  });
+
+  it("reports the gate hit rate when there is data", async () => {
+    vi.mocked(opsApi.overview).mockResolvedValue(
+      overview({
+        gate: { hits: 3, misses: 1, total: 4, hit_rate: 0.75 },
+      }) as never,
+    );
+    draw();
+
+    expect(await screen.findByText(/75% of 4 ingests/i)).toBeInTheDocument();
+  });
+
+  it("says nothing about the gate before any ingest has happened", async () => {
+    /* A 0% hit rate over zero ingests is not a measurement. */
+    draw();
+
+    expect(await screen.findByText(/no sources configured/i)).toBeInTheDocument();
+    expect(screen.queryByText(/ingests skipped/i)).not.toBeInTheDocument();
   });
 });

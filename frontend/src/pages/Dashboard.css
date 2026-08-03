@@ -372,3 +372,87 @@
   padding: 0.35rem 0.9rem;
   font-size: var(--step--1);
 }
+
+/* --- Sources (crawl freshness) ---------------------------------------- */
+
+.dash-note {
+  margin-bottom: var(--space-4);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  max-width: 68ch;
+}
+
+.source-list {
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.source-row {
+  display: grid;
+  grid-template-columns: auto minmax(9rem, 1fr) minmax(0, 1.4fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+/* A dot rather than a coloured row: the status text already carries the
+   meaning, and tinting whole rows makes a dashboard of five boards read as an
+   emergency whenever one is merely disabled. */
+.source-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-strong);
+}
+
+.source-row.tone-ok .source-dot {
+  background: var(--ok);
+}
+.source-row.tone-warn .source-dot {
+  background: var(--warn);
+}
+.source-row.tone-bad .source-dot {
+  background: var(--danger);
+}
+
+.source-row.tone-bad {
+  border-color: color-mix(in oklch, var(--danger) 35%, var(--border));
+}
+
+/* A disabled source is dimmed rather than coloured. It is not a fault, and
+   giving it a status colour would put it in competition with the boards that
+   actually need attention. */
+.source-row.tone-off {
+  opacity: 0.55;
+}
+
+.source-id {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.source-token {
+  font-family: var(--font-mono, monospace);
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-status {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.source-count {
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
