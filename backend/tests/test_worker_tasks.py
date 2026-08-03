@@ -6,12 +6,16 @@ it once -- RQ's delivery guarantee is at-least-once, so a redelivered job is
 normal operation, not an edge case.
 """
 
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+
 import pytest
 
 from app.db import SessionLocal
 from app.extraction import PROFILE_EXTRACTION_VERSION, ExtractedProfile
 from app.models import IngestJob, JobPosting, Profile, hash_url
 from app.providers import LLMPermanentError, LLMTransientError
+from app.queues import QUEUE_INGEST, QUEUE_INTERACTIVE, QUEUE_SCORING
 from app.workers import tasks
 from app.workers.fetch import PermanentFetchError, TransientFetchError
 
@@ -445,3 +449,131 @@ class TestHashUrl:
         (?page=2 matters, ?utm_source=x does not).
         """
         assert hash_url("https://a.com/x") != hash_url("https://a.com/x/")
+
+
+@dataclass
+class RecordingQueue:
+    """Records enqueues instead of talking to Redis."""
+
+    name: str
+    fail: bool = False
+    calls: list = field(default_factory=list)
+
+    def enqueue(self, func, *args, **kwargs):
+        if self.fail:
+            raise ConnectionError("redis is down")
+        self.calls.append((func, args, kwargs))
+        return SimpleNamespace(id="rq-fake", origin=self.name)
+
+
+@pytest.fixture
+def scoring_queues(monkeypatch):
+    """One recorder per queue name, so routing can be asserted.
+
+    Keyed by name rather than shared: a single recorder would pass whether or
+    not the handoff picked the right queue, which is the whole point.
+    """
+    made: dict[str, RecordingQueue] = {}
+
+    def fake_get_queue(name: str = "interactive") -> RecordingQueue:
+        return made.setdefault(name, RecordingQueue(name))
+
+    # Patched on app.queues rather than on tasks, because _enqueue_scoring
+    # imports get_queue inside the function body -- the lookup happens at
+    # call time, so the module attribute is what it resolves against.
+    monkeypatch.setattr("app.queues.get_queue", fake_get_queue)
+    return made
+
+
+class TestScoringHandoff:
+    """A fetched posting has to reach the scorer, or Path A stops halfway.
+
+    This is the M6 requeue bug's exact shape -- an enqueue with the wrong
+    queue and no test asserting which one. It went unnoticed there because
+    everything still ran, just in the wrong lane. Here the failure is worse:
+    nothing runs at all and the job still reports `succeeded`.
+    """
+
+    def test_a_successful_fetch_enqueues_scoring(self, fetched, scoring_queues, job_id):
+        tasks.process_job_url(job_id)
+
+        assert len(scoring_queues[QUEUE_SCORING].calls) == 1
+
+    def test_it_does_not_land_on_the_interactive_queue(
+        self, fetched, scoring_queues, job_id
+    ):
+        """Scoring is an LLM call plus model inference. On `interactive` it
+        would sit in front of URL submissions that take milliseconds to
+        accept -- the head-of-line problem the four-queue split exists for,
+        arriving one lane further down."""
+        tasks.process_job_url(job_id)
+
+        assert QUEUE_INTERACTIVE not in scoring_queues
+        assert QUEUE_INGEST not in scoring_queues
+
+    def test_it_passes_the_profile_and_the_posting(
+        self, fetched, scoring_queues, job_id
+    ):
+        """Both ids, in that order. Swapped, the scorer would look up a
+        profile by a posting id -- which usually finds nothing and returns
+        `profile_or_posting_missing`, so the job succeeds and no match is
+        ever written."""
+        tasks.process_job_url(job_id)
+
+        db = SessionLocal()
+        try:
+            job = db.get(IngestJob, job_id)
+            expected = (job.profile_id, job.job_posting_id)
+        finally:
+            db.close()
+
+        func, args, _ = scoring_queues[QUEUE_SCORING].calls[0]
+        assert func == "app.workers.tasks.score_posting_for_profile"
+        assert args == expected
+
+    def test_a_permanent_failure_enqueues_nothing(
+        self, monkeypatch, scoring_queues, job_id
+    ):
+        """There is no posting to score. Enqueueing anyway would spend an LLM
+        call learning that."""
+
+        def boom(url):
+            raise PermanentFetchError("HTTP 404")
+
+        monkeypatch.setattr(tasks, "fetch_posting_text", boom)
+
+        tasks.process_job_url(job_id)
+
+        assert scoring_queues == {}
+
+    def test_an_empty_page_enqueues_nothing(self, monkeypatch, scoring_queues, job_id):
+        monkeypatch.setattr(tasks, "fetch_posting_text", lambda url: "   ")
+
+        tasks.process_job_url(job_id)
+
+        assert scoring_queues == {}
+
+    def test_a_broker_outage_does_not_fail_the_fetch(
+        self, fetched, monkeypatch, job_id
+    ):
+        """The fetch genuinely succeeded and the posting is durable.
+
+        Raising here would hand the job back to the retry policy, which would
+        re-request a page we already have -- a request to a third party that
+        cannot be taken back. A missing `matches` row is recoverable by a
+        sweep; an extra outbound fetch is not.
+        """
+        monkeypatch.setattr(
+            "app.queues.get_queue",
+            lambda name="interactive": RecordingQueue(name, fail=True),
+        )
+
+        assert tasks.process_job_url(job_id) == "fetched"
+
+        db = SessionLocal()
+        try:
+            job = db.get(IngestJob, job_id)
+            assert job.status == "succeeded"
+            assert job.job_posting_id is not None
+        finally:
+            db.close()
