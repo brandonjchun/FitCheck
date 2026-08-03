@@ -206,6 +206,58 @@ class Profile(Base):
         return f"<Profile id={self.id} file={self.original_filename!r}>"
 
 
+class UrlBatch(Base):
+    """One uploaded list of job-posting URLs.
+
+    Groups the jobs it fanned out into, so a client can poll one endpoint for
+    aggregate progress instead of N individual ones.
+
+    Note what this table does *not* have: a `completed_count`. Progress is
+    derived with a GROUP BY over the jobs pointing here. A counter column
+    would be incremented by N concurrent workers, which is the
+    `counter = counter + 1` double-count that at-least-once delivery
+    guarantees will eventually happen -- and a summary that disagrees with
+    the rows it summarizes is worse than no summary.
+    """
+
+    __tablename__ = "url_batches"
+    __table_args__ = (Index("ix_url_batches_user_id", "user_id"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    user_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    profile_id: Mapped[int] = mapped_column(
+        BigInteger,
+        ForeignKey("profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    original_filename: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # What happened to the lines the user sent. Stored rather than derived
+    # because the rejected ones never became jobs -- there is no row to count
+    # later, and "you sent 4,000 lines and we took 500" is exactly what the
+    # user needs to see.
+    total_urls: Mapped[int] = mapped_column(Integer, nullable=False)
+    rejected_urls: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    duplicate_urls: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<UrlBatch id={self.id} urls={self.total_urls}>"
+
+
 def hash_url(url: str) -> str:
     """Stable dedupe key for a URL.
 
@@ -252,6 +304,8 @@ class Job(Base):
         # The ops dashboard's hot path: count/filter by state.
         Index("ix_jobs_status", "status"),
         Index("ix_jobs_created_at", "created_at"),
+        # Batch progress groups on this, on every poll while a batch runs.
+        Index("ix_jobs_batch_id", "batch_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -262,6 +316,16 @@ class Job(Base):
         # for, so deleting a profile should not leave orphaned work records.
         ForeignKey("profiles.id", ondelete="CASCADE"),
         nullable=False,
+    )
+
+    # Which upload produced this job, or NULL for a single URL submission.
+    # SET NULL rather than CASCADE on delete: the job is a real work record
+    # with its own history, and discarding a batch should orphan the grouping
+    # rather than destroy the audit trail of what was fetched.
+    batch_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("url_batches.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     url: Mapped[str] = mapped_column(Text, nullable=False)
