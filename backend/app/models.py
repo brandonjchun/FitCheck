@@ -1,4 +1,4 @@
-"""SQLAlchemy ORM models -- the storage shape.
+﻿"""SQLAlchemy ORM models -- the storage shape.
 
 Deliberately separate from schemas.py (Pydantic, the API contract). A column
 rename here should not be a breaking API change, and internal columns should
@@ -27,7 +27,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
-from app.extraction import CURRENT_EXTRACTION_VERSION
+from app.extraction import PROFILE_EXTRACTION_VERSION
 from app.skills import normalize_skill_items
 
 # The job lifecycle from spec section 6.3. Stored as text rather than a
@@ -129,7 +129,7 @@ class Profile(Base):
     #
     # A content hash cannot detect a prompt change, so without this a better
     # prompt would leave every stored profile on the old behaviour with no way
-    # to find them. See extraction.CURRENT_EXTRACTION_VERSION.
+    # to find them. See extraction.PROFILE_EXTRACTION_VERSION.
     extraction_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # embedding: vector(384) is added at M7, together with the pgvector
@@ -180,7 +180,7 @@ class Profile(Base):
         """
         return (
             self.extracted is not None
-            and self.extraction_version == CURRENT_EXTRACTION_VERSION
+            and self.extraction_version == PROFILE_EXTRACTION_VERSION
         )
 
     @property
@@ -304,10 +304,10 @@ def canonical_key_for_url(url: str) -> str:
 class JobPosting(Base):
     """One job posting: the thing a person applies to.
 
-    A *result* record, as opposed to Job's *work* record (spec section 5.6).
+    A *result* record, as opposed to IngestJob's *work* record (spec section 5.6).
     It exists only on a successful fetch, and it outlives any individual
     attempt -- at M8 one posting is re-crawled dozens of times over its life,
-    each crawl a new Job row against this same posting.
+    each crawl a new IngestJob row against this same posting.
 
     Decoupled from any user on purpose. Two people submitting the same
     Greenhouse posting must land on one row, or the crawler creates a third.
@@ -338,8 +338,38 @@ class JobPosting(Base):
     extracted: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     extraction_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Promoted out of the `extracted` blob, per spec section 3.3: anything the
+    # feed filters, sorts, or indexes on becomes a real column, and the long
+    # tail stays in JSONB. A JSONB probe cannot use a plain btree index, so
+    # `WHERE extracted->>'seniority' = 'senior'` is a sequential scan where
+    # `WHERE seniority = 'senior'` is a lookup.
+    #
+    # All null until M7's extraction fills them. They exist now because adding
+    # a nullable column is a catalog write -- instant at any table size --
+    # while *changing* a column's type rewrites every row and rebuilds every
+    # index on it. These five have a known shape, so there is nothing to guess
+    # and no reason to make M7 ship a migration alongside its scoring code.
+    #
+    # Two siblings are deliberately absent for exactly that reason. `source_id`
+    # is a foreign key to a `sources` table that does not exist until M8, so
+    # Postgres would refuse it outright. `embedding` needs pgvector enabled and
+    # a dimension, and the dimension depends on an embedding provider that is
+    # still undecided -- guessing vector(384) and then choosing a model with a
+    # different width is the expensive operation, on the widest column here.
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     company: Mapped[str | None] = mapped_column(Text, nullable=True)
+    location: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Free text rather than an enum, matching how `seniority` is stored on
+    # Profile. The vocabulary comes out of an LLM, so pinning it to a Postgres
+    # enum now would mean an ALTER TYPE the first time a posting says
+    # "flexible" instead of "hybrid".
+    remote_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    seniority: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Numeric(4,1) mirrors profiles.years_experience, so a comparison between
+    # what a posting demands and what a candidate has needs no cast.
+    min_years: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
 
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -351,12 +381,42 @@ class JobPosting(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
+    # Tombstone. Set when a posting is absent from a *complete* enumeration of
+    # its source (M8), never by deleting the row -- `matches` will reference
+    # postings, so a delete either cascades away a user's history or raises a
+    # foreign key error mid-crawl. A tombstone also gives the UI an honest
+    # state ("this role appears to have been filled") rather than the row
+    # silently vanishing.
+    #
+    # Present now because it is the predicate in M9's partial vector index
+    # (`WHERE closed_at IS NULL`), which is what keeps closed postings out of
+    # ANN retrieval entirely rather than filtering them after the fact.
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    @property
+    def is_open(self) -> bool:
+        """Whether this posting is still live.
+
+        A property rather than a stored boolean, so it cannot drift from
+        `closed_at`. Two columns encoding one fact is two things to keep in
+        sync and one of them will eventually be wrong.
+        """
+        return self.closed_at is None
+
     def __repr__(self) -> str:
         return f"<JobPosting id={self.id} url={self.url!r}>"
 
 
-class Job(Base):
+class IngestJob(Base):
     """One submitted job-posting URL: the unit of asynchronous work.
+
+    Named `ingest_jobs` rather than `jobs` because a job *catalog* now exists
+    (spec section 5.1). With both tables present, "job" means two different
+    things and every sentence about the system needs a disambiguating clause
+    -- which is exactly the situation the rename was written to prevent, and
+    the reason it happens now rather than after M8 doubles the call sites.
 
     Separate from JobPosting on purpose (spec section 5.2). This is a *work
     record* -- it exists the instant a URL is submitted and survives every
@@ -369,21 +429,23 @@ class Job(Base):
     this table IS the audit log.
     """
 
-    __tablename__ = "jobs"
+    __tablename__ = "ingest_jobs"
     __table_args__ = (
         # Enforced in the database, not the application. An application-level
         # "does this already exist?" check races: two concurrent submissions
         # both read "no", both insert, and you have scraped the same page
         # twice. The database is the only place this can be decided.
-        UniqueConstraint("profile_id", "url_hash", name="jobs_profile_url_uniq"),
+        UniqueConstraint(
+            "profile_id", "url_hash", name="ingest_jobs_profile_url_uniq"
+        ),
         # Postgres does NOT index foreign keys automatically (unlike primary
         # keys). Without this, "all jobs for this profile" is a seq scan.
-        Index("ix_jobs_profile_id", "profile_id"),
+        Index("ix_ingest_jobs_profile_id", "profile_id"),
         # The ops dashboard's hot path: count/filter by state.
-        Index("ix_jobs_status", "status"),
-        Index("ix_jobs_created_at", "created_at"),
+        Index("ix_ingest_jobs_status", "status"),
+        Index("ix_ingest_jobs_created_at", "created_at"),
         # Batch progress groups on this, on every poll while a batch runs.
-        Index("ix_jobs_batch_id", "batch_id"),
+        Index("ix_ingest_jobs_batch_id", "batch_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -450,4 +512,4 @@ class Job(Base):
         return self.status in TERMINAL_STATUSES
 
     def __repr__(self) -> str:
-        return f"<Job id={self.id} status={self.status!r} url={self.url!r}>"
+        return f"<IngestJob id={self.id} status={self.status!r} url={self.url!r}>"

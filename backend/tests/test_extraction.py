@@ -1,4 +1,4 @@
-"""Tests for app.workers.extract -- the LLM extraction pipeline.
+﻿"""Tests for app.workers.extract -- the LLM extraction pipeline.
 
 No network. LLMProvider is a Protocol, so a plain object with one
 complete_json method satisfies it structurally -- which is exactly the
@@ -17,7 +17,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.extraction import (
-    CURRENT_EXTRACTION_VERSION,
+    PROFILE_EXTRACTION_VERSION,
     EducationItem,
     ExtractedProfile,
     SkillItem,
@@ -369,7 +369,7 @@ class TestExtractionVersioning:
     def test_current_version_counts_as_current(self) -> None:
         profile = Profile(original_filename="r.pdf", raw_text="text")
         profile.extracted = {"skills": []}
-        profile.extraction_version = CURRENT_EXTRACTION_VERSION
+        profile.extraction_version = PROFILE_EXTRACTION_VERSION
 
         assert profile.extraction_is_current is True
 
@@ -382,7 +382,7 @@ class TestExtractionVersioning:
         """
         profile = Profile(original_filename="r.pdf", raw_text="text")
         profile.extracted = {"skills": []}
-        profile.extraction_version = CURRENT_EXTRACTION_VERSION - 1
+        profile.extraction_version = PROFILE_EXTRACTION_VERSION - 1
 
         assert profile.extraction_ok is True
         assert profile.extraction_is_current is False

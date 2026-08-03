@@ -1,4 +1,4 @@
-"""Batch URL upload: fan-out, caps, and aggregate progress.
+﻿"""Batch URL upload: fan-out, caps, and aggregate progress.
 
 The queue is faked at the boundary, so these assert *what would have been
 enqueued* without needing Redis. What matters most here is the queue a batch
@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.db import SessionLocal
 from app.main import app
-from app.models import Job, Profile
+from app.models import IngestJob, Profile
 from app.queues import QUEUE_INGEST, QUEUE_INTERACTIVE
 
 BATCH_URL = "/api/batches"
@@ -145,7 +145,7 @@ class TestCreateBatch:
 
         db = SessionLocal()
         try:
-            jobs = db.query(Job).filter(Job.batch_id == batch_id).all()
+            jobs = db.query(IngestJob).filter(IngestJob.batch_id == batch_id).all()
             assert len(jobs) == 2
             assert {job.status for job in jobs} == {"queued"}
         finally:
@@ -159,7 +159,7 @@ class TestCreateBatch:
 
         db = SessionLocal()
         try:
-            job = db.query(Job).filter(Job.batch_id == batch_id).one()
+            job = db.query(IngestJob).filter(IngestJob.batch_id == batch_id).one()
             assert job.url == "https://e.com/j/1"
         finally:
             db.close()
@@ -217,7 +217,7 @@ class TestCreateBatch:
         assert response.status_code == 202
         db = SessionLocal()
         try:
-            job = db.query(Job).filter(Job.batch_id == response.json()["id"]).one()
+            job = db.query(IngestJob).filter(IngestJob.batch_id == response.json()["id"]).one()
             assert job.status == "queued"
             assert job.rq_job_id is None
         finally:
@@ -255,7 +255,7 @@ class TestBatchStatus:
 
         db = SessionLocal()
         try:
-            jobs = db.query(Job).filter(Job.batch_id == batch_id).all()
+            jobs = db.query(IngestJob).filter(IngestJob.batch_id == batch_id).all()
             jobs[0].status = "succeeded"
             jobs[1].status = "dead"
             db.commit()
@@ -276,7 +276,7 @@ class TestBatchStatus:
 
         db = SessionLocal()
         try:
-            for job in db.query(Job).filter(Job.batch_id == batch_id).all():
+            for job in db.query(IngestJob).filter(IngestJob.batch_id == batch_id).all():
                 job.status = "dead"
             db.commit()
         finally:

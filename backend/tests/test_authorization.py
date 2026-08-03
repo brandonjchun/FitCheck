@@ -1,4 +1,4 @@
-"""Ownership enforcement: the IDOR tests.
+﻿"""Ownership enforcement: the IDOR tests.
 
 Authentication proves who; authorization proves allowed. Everything here is
 about the gap between the two -- a caller with a perfectly valid session
@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.main import app
-from app.models import Job, Profile, hash_url
+from app.models import IngestJob, Profile, hash_url
 
 
 @pytest.fixture
@@ -54,7 +54,7 @@ def _make_profile(user_id: int, filename: str = "victim.pdf") -> int:
 def _make_job(profile_id: int, url: str = "https://example.com/p") -> int:
     db = SessionLocal()
     try:
-        job = Job(
+        job = IngestJob(
             profile_id=profile_id, url=url, url_hash=hash_url(url), status="queued"
         )
         db.add(job)

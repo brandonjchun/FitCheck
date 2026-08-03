@@ -1,4 +1,4 @@
-"""Routes for submitting and polling job-posting URLs."""
+﻿"""Routes for submitting and polling job-posting URLs."""
 
 import logging
 
@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Job, Profile, User, hash_url
+from app.models import IngestJob, Profile, User, hash_url
 from app.queues import (
     FAILURE_TTL,
     JOB_TIMEOUT,
@@ -31,7 +31,7 @@ def submit_job(
     payload: JobSubmitRequest,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
-) -> Job:
+) -> IngestJob:
     """Queue a job-posting URL for processing.
 
     Returns **202 Accepted**, not 201. The distinction is the whole point of
@@ -68,14 +68,14 @@ def submit_job(
     # guarantee -- two concurrent submissions can both pass it. The unique
     # constraint below is what actually prevents the duplicate.
     existing = db.execute(
-        select(Job).where(
-            Job.profile_id == payload.profile_id, Job.url_hash == url_digest
+        select(IngestJob).where(
+            IngestJob.profile_id == payload.profile_id, IngestJob.url_hash == url_digest
         )
     ).scalar_one_or_none()
     if existing is not None:
         return existing
 
-    job = Job(
+    job = IngestJob(
         profile_id=payload.profile_id,
         url=url,
         url_hash=url_digest,
@@ -91,8 +91,8 @@ def submit_job(
         # doing its job -- roll back and return whichever row won.
         db.rollback()
         winner = db.execute(
-            select(Job).where(
-                Job.profile_id == payload.profile_id, Job.url_hash == url_digest
+            select(IngestJob).where(
+                IngestJob.profile_id == payload.profile_id, IngestJob.url_hash == url_digest
             )
         ).scalar_one()
         logger.info("submit_job: lost insert race, returning job %s", winner.id)
@@ -138,7 +138,7 @@ def get_job(
     response: Response,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
-) -> Job:
+) -> IngestJob:
     """Current state of one job. This is the endpoint the frontend polls.
 
     Sets `Cache-Control: no-store` because a cached job status is worse than
@@ -151,9 +151,9 @@ def get_job(
     `profiles.user_id` and there would be no way to say which was right.
     """
     job = db.scalar(
-        select(Job)
-        .join(Profile, Job.profile_id == Profile.id)
-        .where(Job.id == job_id, Profile.user_id == user.id)
+        select(IngestJob)
+        .join(Profile, IngestJob.profile_id == Profile.id)
+        .where(IngestJob.id == job_id, Profile.user_id == user.id)
     )
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
@@ -169,7 +169,7 @@ def list_jobs(
     limit: int = 50,
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
-) -> list[Job]:
+) -> list[IngestJob]:
     """List jobs, newest first. Filterable by profile and status.
 
     Both filters hit indexed columns. This is the query the M10 ops dashboard
@@ -183,16 +183,16 @@ def list_jobs(
     one.
     """
     query = (
-        select(Job)
-        .join(Profile, Job.profile_id == Profile.id)
+        select(IngestJob)
+        .join(Profile, IngestJob.profile_id == Profile.id)
         .where(Profile.user_id == user.id)
-        .order_by(Job.created_at.desc())
+        .order_by(IngestJob.created_at.desc())
         .limit(min(limit, 200))
     )
 
     if profile_id is not None:
-        query = query.where(Job.profile_id == profile_id)
+        query = query.where(IngestJob.profile_id == profile_id)
     if status is not None:
-        query = query.where(Job.status == status)
+        query = query.where(IngestJob.status == status)
 
     return list(db.execute(query).scalars().all())

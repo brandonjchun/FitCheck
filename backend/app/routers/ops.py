@@ -1,4 +1,4 @@
-"""Operational visibility: queue depth, worker coverage, and the dead letter.
+﻿"""Operational visibility: queue depth, worker coverage, and the dead letter.
 
 Separate from `/api/jobs` on purpose, and the difference is authorization,
 not convenience. `/api/jobs` carries a mandatory ownership join -- it answers
@@ -29,7 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import Job
+from app.models import IngestJob
 from app.queues import (
     FAILURE_TTL,
     JOB_TIMEOUT,
@@ -123,8 +123,8 @@ def overview(db: Session = Depends(get_db)) -> OpsOverview:
             )
         )
 
-    # --- Job rows, counted by status ------------------------------------
-    rows = db.execute(select(Job.status, func.count()).group_by(Job.status)).all()
+    # --- IngestJob rows, counted by status ------------------------------------
+    rows = db.execute(select(IngestJob.status, func.count()).group_by(IngestJob.status)).all()
     by_status = [StatusCount(status=str(s), count=int(c)) for s, c in rows]
 
     return OpsOverview(
@@ -147,9 +147,9 @@ def dead_letter(limit: int = 50, db: Session = Depends(get_db)) -> list[DeadLett
     view; `ingest_jobs` is ours.
     """
     stmt = (
-        select(Job)
-        .where(Job.status.in_(("dead", "failed")))
-        .order_by(Job.updated_at.desc())
+        select(IngestJob)
+        .where(IngestJob.status.in_(("dead", "failed")))
+        .order_by(IngestJob.updated_at.desc())
         .limit(min(limit, 200))
     )
     return [
@@ -174,7 +174,7 @@ def requeue(job_id: int, db: Session = Depends(get_db)) -> RequeueResponse:
     dead-lettering again on its next tick because the counter was already
     exhausted.
     """
-    job = db.get(Job, job_id)
+    job = db.get(IngestJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
 
@@ -184,7 +184,7 @@ def requeue(job_id: int, db: Session = Depends(get_db)) -> RequeueResponse:
         # wastes a slot and muddies the audit trail for no gain.
         raise HTTPException(
             status_code=409,
-            detail=f"Job {job_id} is {job.status}; only failed or dead jobs can be requeued",
+            detail=f"IngestJob {job_id} is {job.status}; only failed or dead jobs can be requeued",
         )
 
     job.status = "queued"

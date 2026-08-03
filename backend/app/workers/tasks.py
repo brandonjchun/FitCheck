@@ -1,4 +1,4 @@
-"""Functions RQ executes in a worker process.
+﻿"""Functions RQ executes in a worker process.
 
 Two rules govern everything in this file.
 
@@ -25,8 +25,8 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
-from app.extraction import CURRENT_EXTRACTION_VERSION
-from app.models import Job, JobPosting, Profile, canonical_key_for_url
+from app.extraction import PROFILE_EXTRACTION_VERSION
+from app.models import IngestJob, JobPosting, Profile, canonical_key_for_url
 from app.providers import LLMError, LLMPermanentError
 from app.workers.extract import extract_profile
 from app.workers.fetch import PermanentFetchError, fetch_posting_text
@@ -114,7 +114,7 @@ def extract_profile_task(profile_id: int) -> str:
         # Written in the same commit as the blob. Setting it separately would
         # allow a crash between the two to leave an extraction whose
         # generation is unknown, which is worse than either value alone.
-        profile.extraction_version = CURRENT_EXTRACTION_VERSION
+        profile.extraction_version = PROFILE_EXTRACTION_VERSION
         db.commit()
 
     return "extracted"
@@ -144,7 +144,7 @@ def process_job_url(job_id: int) -> str:
                           -> (attempts exhausted) -> dead
     """
     with _session() as db:
-        job = db.get(Job, job_id)
+        job = db.get(IngestJob, job_id)
         if job is None:
             logger.warning("process_job_url: job %s is gone", job_id)
             return "job_missing"
@@ -197,7 +197,7 @@ def process_job_url(job_id: int) -> str:
     posting_id = _upsert_posting(url, raw_text)
 
     with _session() as db:
-        job = db.get(Job, job_id)
+        job = db.get(IngestJob, job_id)
         if job is not None:
             job.status = "succeeded"
             job.last_error = None
@@ -270,7 +270,7 @@ def _record_failure(job_id: int, exc: Exception, permanent: bool = False) -> Non
     from app.queues import MAX_RETRIES
 
     with _session() as db:
-        job = db.get(Job, job_id)
+        job = db.get(IngestJob, job_id)
         if job is None:
             return
 

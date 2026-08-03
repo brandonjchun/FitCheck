@@ -1,4 +1,4 @@
-"""RQ queue construction -- four queues, separated by latency class.
+﻿"""RQ queue construction -- four queues, separated by latency class.
 
 Strip away the framework and a job queue is a list in Redis plus a
 convention: enqueue serializes a function reference and its arguments and
@@ -100,9 +100,6 @@ def retry_intervals() -> list[int]:
     ]
 
 
-# Backwards-compatible name. Prefer retry_intervals() -- this one is a plain
-# list and therefore identical for every job that uses it.
-RETRY_INTERVALS: list[int] = list(RETRY_BASE_INTERVALS)
 
 # Hard ceiling on one attempt. This is the only thing that stops a pathological
 # document or a hung socket from occupying a worker forever -- the failure mode

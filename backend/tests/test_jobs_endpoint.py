@@ -1,4 +1,4 @@
-"""Job submission, dedupe, and polling.
+﻿"""IngestJob submission, dedupe, and polling.
 
 The queue is faked at the boundary: `app.routers.jobs.get_queue` is patched
 with a recorder, so these tests assert *what would have been enqueued*
@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.main import app
-from app.models import Job, Profile
+from app.models import IngestJob, Profile
 from app.queues import (
     QUEUE_INGEST,
     QUEUE_INTERACTIVE,
@@ -249,7 +249,7 @@ class TestSubmitJob:
 
         db = SessionLocal()
         try:
-            job = db.get(Job, response.json()["id"])
+            job = db.get(IngestJob, response.json()["id"])
             assert job is not None
             assert job.status == "queued"
             assert job.rq_job_id is None

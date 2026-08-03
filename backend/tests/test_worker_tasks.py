@@ -1,4 +1,4 @@
-"""Worker task behaviour, especially idempotency.
+﻿"""Worker task behaviour, especially idempotency.
 
 These call the task functions directly rather than going through RQ. What
 matters is that running a task twice produces the same end state as running
@@ -9,8 +9,8 @@ normal operation, not an edge case.
 import pytest
 
 from app.db import SessionLocal
-from app.extraction import CURRENT_EXTRACTION_VERSION, ExtractedProfile
-from app.models import Job, JobPosting, Profile, hash_url
+from app.extraction import PROFILE_EXTRACTION_VERSION, ExtractedProfile
+from app.models import IngestJob, JobPosting, Profile, hash_url
 from app.providers import LLMPermanentError, LLMTransientError
 from app.workers import tasks
 from app.workers.fetch import PermanentFetchError, TransientFetchError
@@ -47,7 +47,7 @@ def profile_id(make_user):
 def job_id(profile_id):
     db = SessionLocal()
     try:
-        job = Job(
+        job = IngestJob(
             profile_id=profile_id,
             url="https://example.com/posting",
             url_hash=hash_url("https://example.com/posting"),
@@ -103,7 +103,7 @@ class TestExtractProfileTask:
             assert profile.extracted["skills"][0]["name"] == "Python"
             # Stamped in the same commit as the blob, so the two cannot
             # disagree about which rules produced it.
-            assert profile.extraction_version == CURRENT_EXTRACTION_VERSION
+            assert profile.extraction_version == PROFILE_EXTRACTION_VERSION
             assert profile.extraction_is_current is True
         finally:
             db.close()
@@ -129,7 +129,7 @@ class TestExtractProfileTask:
         db = SessionLocal()
         try:
             profile = db.get(Profile, profile_id)
-            profile.extraction_version = CURRENT_EXTRACTION_VERSION - 1
+            profile.extraction_version = PROFILE_EXTRACTION_VERSION - 1
             db.commit()
         finally:
             db.close()
@@ -140,7 +140,7 @@ class TestExtractProfileTask:
         db = SessionLocal()
         try:
             assert db.get(Profile, profile_id).extraction_version == (
-                CURRENT_EXTRACTION_VERSION
+                PROFILE_EXTRACTION_VERSION
             )
         finally:
             db.close()
@@ -212,7 +212,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            job = db.get(Job, job_id)
+            job = db.get(IngestJob, job_id)
             assert job.status == "succeeded"
             assert job.attempts == 1
             assert job.last_error is None
@@ -228,7 +228,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            job = db.get(Job, job_id)
+            job = db.get(IngestJob, job_id)
             posting = db.get(JobPosting, job.job_posting_id)
             assert "Rust and Postgres." in posting.raw_text
             assert posting.canonical_key.startswith("url:")
@@ -244,7 +244,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            assert db.get(Job, job_id).attempts == 1  # not incremented twice
+            assert db.get(IngestJob, job_id).attempts == 1  # not incremented twice
         finally:
             db.close()
 
@@ -268,7 +268,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            job = db.get(Job, job_id)
+            job = db.get(IngestJob, job_id)
             assert job.status == "dead"
             assert job.attempts == 1
             assert "404" in job.last_error
@@ -288,7 +288,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            assert db.get(Job, job_id).status == "failed"  # not dead, will retry
+            assert db.get(IngestJob, job_id).status == "failed"  # not dead, will retry
         finally:
             db.close()
 
@@ -302,7 +302,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            assert db.get(Job, job_id).status == "dead"
+            assert db.get(IngestJob, job_id).status == "dead"
         finally:
             db.close()
 
@@ -325,7 +325,7 @@ class TestProcessJobUrl:
                 db.add(profile)
                 db.commit()
                 db.refresh(profile)
-                job = Job(
+                job = IngestJob(
                     profile_id=profile.id,
                     url=url,
                     url_hash=hash_url(url),
@@ -343,7 +343,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            postings = {db.get(Job, jid).job_posting_id for jid in job_ids}
+            postings = {db.get(IngestJob, jid).job_posting_id for jid in job_ids}
             assert len(postings) == 1
         finally:
             db.close()
@@ -371,7 +371,7 @@ class TestProcessJobUrl:
                 db.add(profile)
                 db.commit()
                 db.refresh(profile)
-                job = Job(
+                job = IngestJob(
                     profile_id=profile.id,
                     url=url,
                     url_hash=hash_url(url),
@@ -389,7 +389,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            postings = {db.get(Job, jid).job_posting_id for jid in job_ids}
+            postings = {db.get(IngestJob, jid).job_posting_id for jid in job_ids}
             assert len(postings) == 1
         finally:
             db.close()
@@ -398,7 +398,7 @@ class TestProcessJobUrl:
         """The row and RQ's registry must agree; RQ only learns by exception."""
         db = SessionLocal()
         try:
-            job = db.get(Job, job_id)
+            job = db.get(IngestJob, job_id)
             # _record_failure runs *after* process_job_url incremented the
             # counter, so this is the state of a third and final attempt.
             job.attempts = 3  # == MAX_RETRIES
@@ -410,7 +410,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            job = db.get(Job, job_id)
+            job = db.get(IngestJob, job_id)
             assert job.status == "dead"  # attempts (3) >= MAX_RETRIES
             assert "fetch exploded" in job.last_error
             assert job.is_terminal is True
@@ -422,7 +422,7 @@ class TestProcessJobUrl:
 
         db = SessionLocal()
         try:
-            job = db.get(Job, job_id)
+            job = db.get(IngestJob, job_id)
             assert job.status == "failed"
             assert job.is_terminal is True
         finally:

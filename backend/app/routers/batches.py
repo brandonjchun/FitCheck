@@ -1,4 +1,4 @@
-"""Path A-bulk: upload a .txt of job-posting URLs, poll one progress endpoint.
+﻿"""Path A-bulk: upload a .txt of job-posting URLs, poll one progress endpoint.
 
 The distinction from Path A is not size, it is latency class. One submitted
 URL means a human is watching a spinner; a 500-URL list means they uploaded
@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models import Job, Profile, UrlBatch, User, hash_url
+from app.models import IngestJob, Profile, UrlBatch, User, hash_url
 from app.queues import (
     FAILURE_TTL,
     JOB_TIMEOUT,
@@ -75,8 +75,8 @@ def create_batch(
     open_batches = db.scalar(
         select(func.count())
         .select_from(UrlBatch)
-        .join(Job, Job.batch_id == UrlBatch.id)
-        .where(UrlBatch.user_id == user.id, Job.status.in_(_IN_FLIGHT))
+        .join(IngestJob, IngestJob.batch_id == UrlBatch.id)
+        .where(UrlBatch.user_id == user.id, IngestJob.status.in_(_IN_FLIGHT))
     )
     if open_batches and open_batches >= settings.max_open_batches_per_user:
         raise HTTPException(
@@ -143,10 +143,10 @@ def create_batch(
         for url in urls
     ]
     created = db.execute(
-        pg_insert(Job)
+        pg_insert(IngestJob)
         .values(rows)
         .on_conflict_do_nothing(index_elements=["profile_id", "url_hash"])
-        .returning(Job.id)
+        .returning(IngestJob.id)
     ).scalars().all()
 
     # Count only what this upload actually created, so the reported total
@@ -230,9 +230,9 @@ def get_batch(
     # what keeps this cheap enough to poll.
     counts = dict(
         db.execute(
-            select(Job.status, func.count())
-            .where(Job.batch_id == batch.id)
-            .group_by(Job.status)
+            select(IngestJob.status, func.count())
+            .where(IngestJob.batch_id == batch.id)
+            .group_by(IngestJob.status)
         ).all()
     )
 
@@ -279,9 +279,9 @@ def list_batches(
     # The per-batch version is the N+1 that makes a list endpoint slow in
     # exactly the situation it is meant for -- a user with many batches.
     grouped = db.execute(
-        select(Job.batch_id, Job.status, func.count())
-        .where(Job.batch_id.in_([batch.id for batch in batches]))
-        .group_by(Job.batch_id, Job.status)
+        select(IngestJob.batch_id, IngestJob.status, func.count())
+        .where(IngestJob.batch_id.in_([batch.id for batch in batches]))
+        .group_by(IngestJob.batch_id, IngestJob.status)
     ).all()
 
     counts_by_batch: dict[int, dict[str, int]] = {}

@@ -26,22 +26,31 @@ from pydantic import BaseModel, Field
 
 Seniority = Literal["junior", "mid", "senior", "staff", "unknown"]
 
-# Stamped onto every profile at extraction time. Bump it whenever the prompt
-# or the schema below changes in a way that makes an older extraction
-# non-comparable to a new one.
+# Extraction versions, stamped at extraction time and bumped whenever a
+# prompt or schema change makes an older extraction non-comparable to a new
+# one.
 #
-# It exists because a content hash cannot see a prompt change. The gate in
-# spec section 6.7 skips re-extraction when the source text is unchanged, and
-# without a version alongside it, improving the prompt would silently leave
-# every stored profile on the old behaviour with no way to find them. With
-# it, "what needs re-extracting" is a query:
+# They exist because a content hash cannot see a prompt change. The gate in
+# spec section 6.7 skips re-extraction when the source text is unchanged, so
+# without a version beside it, improving a prompt would silently leave every
+# stored row on the old behaviour with no way to find them. With one, "what
+# needs re-extracting" is a query:
 #
-#     WHERE extraction_version < CURRENT_EXTRACTION_VERSION
+#     WHERE extraction_version < PROFILE_EXTRACTION_VERSION
 #
-# Note what does NOT belong here: skill-alias changes. Normalization is
+# **Two counters, because there are two pipelines.** Resumes and job postings
+# are extracted by different prompts against different schemas, and they will
+# change on different days. One shared constant would mean bumping the resume
+# prompt marks every posting in the catalog stale -- at M8 that is a
+# re-extraction of the whole catalog at full LLM cost, for a change that had
+# nothing to do with postings. The reverse is equally wrong.
+#
+# Note what does NOT belong in either: skill-alias changes. Normalization is
 # applied when reading (see models.Profile.skills), not when writing, so
 # growing the alias map changes what scoring sees without re-running anything.
-# Only a change to what the *model* is asked to produce bumps this.
+# Only a change to what the *model* is asked to produce bumps a version.
+#
+# Resume extraction (ExtractedProfile, below):
 #
 #   1 -- initial prompt and schema.
 #   2 -- instruct per-skill `years` to be inferred from the date range of the
@@ -55,7 +64,22 @@ Seniority = Literal["junior", "mid", "senior", "staff", "unknown"]
 #        exists, a new skill field also invalidates every tuned blend weight
 #        and every stored score, so the same change costs a scorer_version
 #        bump and a full re-score on top of the re-extraction.
-CURRENT_EXTRACTION_VERSION = 3
+PROFILE_EXTRACTION_VERSION = 3
+
+# Job-posting extraction. Nothing writes this yet: M5 stores a posting's text
+# without extracting from it, and M7 is where the JD prompt lands.
+#
+# Starting at 0 rather than 1 means "no posting has been extracted under any
+# version", so the first real prompt is version 1 and the sweep finds every
+# existing row without a special case for null.
+#
+# The open design question for M7, recorded here because this constant is
+# where it will bite: the spec says postings are extracted "using the same
+# schema" as resumes. That is worth challenging. A JD has *required* versus
+# *preferred* skills and a `min_years` threshold; a resume has years-per-skill
+# and education. Forcing both through ExtractedProfile makes each awkward, and
+# the skill-overlap scoring in section 8.3 reads required/preferred directly.
+POSTING_EXTRACTION_VERSION = 0
 
 
 # Where in the resume a skill was found. Ordered strongest to weakest, which
