@@ -14,7 +14,7 @@ from app.config import settings
 from app.db import SessionLocal
 from app.main import app
 from app.models import User
-from app.queue import get_redis
+from app.queues import get_redis
 from app.security import hash_password, verify_password
 
 PASSWORD = "correct-horse-battery"

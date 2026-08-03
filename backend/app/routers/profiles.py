@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.documents import DocumentError, extract_text
 from app.models import Profile, User
-from app.queue import FAILURE_TTL, JOB_TIMEOUT, RESULT_TTL, get_queue
+from app.queues import FAILURE_TTL, JOB_TIMEOUT, QUEUE_SCORING, RESULT_TTL, get_queue
 from app.schemas import ProfileUploadResponse
 from app.security import current_user, owned_profile
 
@@ -88,8 +88,14 @@ def upload_resume(
 
     # Enqueue after commit, for the same reason as job submission: a worker
     # must never look up a row that has not been written yet.
+    #
+    # `scoring`, not `interactive`: extraction is CPU-and-API bound and takes
+    # tens of seconds, so putting it on the interactive queue would let one
+    # upload delay a URL submission that takes milliseconds to accept. It sits
+    # above `ingest` in the worker's drain order because a stale profile is
+    # annoying and a hung spinner is worse.
     try:
-        get_queue().enqueue(
+        get_queue(QUEUE_SCORING).enqueue(
             "app.workers.tasks.extract_profile_task",
             profile.id,
             job_timeout=JOB_TIMEOUT,
@@ -136,7 +142,7 @@ def reextract_profile(profile: Profile = Depends(owned_profile)) -> Profile:
     profile_id = profile.id
 
     try:
-        get_queue().enqueue(
+        get_queue(QUEUE_SCORING).enqueue(
             "app.workers.tasks.extract_profile_task",
             profile.id,
             job_timeout=JOB_TIMEOUT,

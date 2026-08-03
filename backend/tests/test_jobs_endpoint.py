@@ -9,11 +9,13 @@ test_worker_tasks.py, which calls the task functions directly.
 from dataclasses import dataclass, field
 
 import pytest
+from conftest import make_pdf
 from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.main import app
 from app.models import Job, Profile
+from app.queues import QUEUE_INGEST, QUEUE_INTERACTIVE, QUEUE_SCORING
 
 
 @dataclass
@@ -25,6 +27,7 @@ class FakeRQJob:
 class RecordingQueue:
     """Stands in for rq.Queue, capturing enqueue calls."""
 
+    name: str
     calls: list[tuple] = field(default_factory=list)
     fail: bool = False
 
@@ -36,11 +39,30 @@ class RecordingQueue:
 
 
 @pytest.fixture
-def queue(monkeypatch) -> RecordingQueue:
-    q = RecordingQueue()
-    monkeypatch.setattr("app.routers.jobs.get_queue", lambda: q)
-    monkeypatch.setattr("app.routers.profiles.get_queue", lambda: q)
-    return q
+def queues(monkeypatch) -> dict[str, RecordingQueue]:
+    """One recorder per queue name, created on first request.
+
+    Keyed by name rather than shared, so a test can assert *which* queue a
+    job landed on. That is the whole substance of the four-queue split -- a
+    single shared recorder would pass identically whether or not the routing
+    worked.
+    """
+    made: dict[str, RecordingQueue] = {}
+
+    def fake_get_queue(name: str = QUEUE_INTERACTIVE) -> RecordingQueue:
+        return made.setdefault(name, RecordingQueue(name))
+
+    monkeypatch.setattr("app.routers.jobs.get_queue", fake_get_queue)
+    monkeypatch.setattr("app.routers.profiles.get_queue", fake_get_queue)
+    return made
+
+
+@pytest.fixture
+def queue(queues) -> RecordingQueue:
+    """The interactive queue -- where a single URL submission belongs."""
+    return queues.setdefault(
+        QUEUE_INTERACTIVE, RecordingQueue(QUEUE_INTERACTIVE)
+    )
 
 
 @pytest.fixture
@@ -72,6 +94,42 @@ def profile_id(user) -> int:
         return profile.id
     finally:
         db.close()
+
+
+class TestQueueRouting:
+    """Which queue work lands on, which is the substance of the split.
+
+    A single URL submission and a batch item run the identical function. The
+    queue is the only thing carrying the difference in urgency, so routing is
+    not an implementation detail here -- it is the feature.
+    """
+
+    def test_single_url_submission_goes_to_interactive(
+        self, client, queues, profile_id
+    ):
+        client.post(
+            "/api/jobs",
+            json={"url": "https://example.com/jobs/1", "profile_id": profile_id},
+        )
+
+        assert len(queues[QUEUE_INTERACTIVE].calls) == 1
+        # Never the bulk queue: a human is waiting on this one.
+        assert QUEUE_INGEST not in queues
+
+    def test_extraction_goes_to_scoring(self, client, queues, user):
+        """Not `interactive`, even though an upload is user-facing.
+
+        Extraction is tens of seconds of CPU and API time. On the interactive
+        queue it would delay URL submissions that take milliseconds to
+        accept, which is the same head-of-line problem one queue down.
+        """
+        client.post(
+            "/api/profiles",
+            files={"file": ("r.pdf", make_pdf("Brandon uses Python"), "application/pdf")},
+        )
+
+        assert len(queues[QUEUE_SCORING].calls) == 1
+        assert QUEUE_INTERACTIVE not in queues
 
 
 class TestSubmitJob:

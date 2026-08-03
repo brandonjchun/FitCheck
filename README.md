@@ -302,10 +302,21 @@ Set `SESSION_SECRET` in production. The default in `config.py` is a development 
 
 Workers run in Docker rather than on the Windows host, and the reason is specific: RQ forks a child process per job so a crashed job can't take the worker down with it. `fork()` doesn't exist on Windows, so a host-run `rq worker` needs `SimpleWorker`, which executes jobs in-process and loses that isolation.
 
+There are two worker classes, and the difference between them is the point of running four queues:
+
+| Service | Drains | Role |
+| --- | --- | --- |
+| `worker-interactive` | `interactive scoring ingest` | Serves user-facing work first; helps clear backlog when idle |
+| `worker-bulk` | `ingest` | Batch and crawl work only — can never starve a user request |
+
+RQ checks queues in the order given on the command line every time it looks for work. So the interactive worker pitches in on a backlog when nothing else is waiting, but the instant a user submits a URL, that job is the next one it picks up — ahead of however many thousand batch items are queued behind it.
+
 ```powershell
-docker compose logs -f worker           # follow worker output
-docker compose up -d --scale worker=3   # watch a burst drain in parallel
+docker compose logs -f worker-interactive    # follow user-facing work
+docker compose up -d --scale worker-bulk=4   # drain a batch faster
 ```
+
+Scaling `worker-bulk` adds throughput without any of those processes being able to take capacity from an interactive submission.
 
 ### Tests
 

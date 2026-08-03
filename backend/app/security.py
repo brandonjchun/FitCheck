@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.db import get_db
 from app.models import Profile, User
-from app.queue import get_redis
+from app.queues import get_redis
 
 logger = logging.getLogger(__name__)
 

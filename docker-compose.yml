@@ -44,12 +44,32 @@ services:
       timeout: 3s
       retries: 10
 
-  worker:
+  # Two worker classes, and the difference between them is the whole point of
+  # running four queues.
+  #
+  #   worker-interactive  drains `interactive scoring ingest`, in that order
+  #   worker-bulk         drains `ingest` only
+  #
+  # RQ takes queues in the order given on the command line and checks them in
+  # that order every time it looks for work. So the interactive worker helps
+  # clear a backlog when nothing else is waiting, but the moment a user
+  # submits a URL, that job is the next thing it picks up -- ahead of however
+  # many thousand batch items are queued behind it.
+  #
+  # The bulk workers never touch `interactive`, so scaling them up adds
+  # throughput for batch and crawl work without any of them being able to
+  # starve a user-facing request:
+  #
+  #   docker compose up -d --scale worker-bulk=4
+  worker-interactive: &worker
     # Runs on Linux so RQ can fork a child process per job. On Windows the
     # host would need SimpleWorker, which executes jobs in-process and loses
     # the crash isolation that forking provides.
     build:
       context: ./backend
+    command: >
+      rq worker --url redis://redis:6379/0
+      interactive scoring ingest
     depends_on:
       # Wait for readiness, not just "container started". Postgres accepts
       # connections several seconds after the process launches, and a worker
@@ -90,9 +110,26 @@ services:
     extra_hosts:
       # Required on Linux hosts; a no-op but harmless on Docker Desktop.
       - "host.docker.internal:host-gateway"
-    # Concurrency is the number of worker processes. Raise this to watch a
-    # burst drain in parallel: `docker compose up -d --scale worker=3`.
     restart: unless-stopped
+
+  worker-bulk:
+    # Everything above, with one thing changed: the queue list.
+    #
+    # The YAML merge is not just brevity. These two must agree on database
+    # URL, pool size, and provider settings -- a bulk worker with a different
+    # DATABASE_URL is a bug that shows up as "some jobs vanish", so sharing
+    # one definition is what stops them drifting.
+    <<: *worker
+    # `ingest` alone. No fallback to `interactive`, deliberately: the entire
+    # guarantee is that scaling this service up cannot consume capacity a
+    # user-facing submission needs.
+    #
+    # Concurrency is the number of processes, so this is the dial to turn when
+    # a 2,000-item batch needs to drain faster:
+    #   docker compose up -d --scale worker-bulk=4
+    command: >
+      rq worker --url redis://redis:6379/0
+      ingest
 
 volumes:
   pgdata:

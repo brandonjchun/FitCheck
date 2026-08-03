@@ -189,7 +189,7 @@ def _record_failure(job_id: int, exc: Exception) -> None:
     Sets `dead` once retries are exhausted so the dead-letter list in the M10
     ops dashboard is a plain query rather than a join against RQ's registries.
     """
-    from app.queue import MAX_RETRIES
+    from app.queues import MAX_RETRIES
 
     with _session() as db:
         job = db.get(Job, job_id)

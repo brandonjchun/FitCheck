@@ -9,7 +9,15 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import Job, Profile, User, hash_url
-from app.queue import FAILURE_TTL, JOB_TIMEOUT, MAX_RETRIES, RESULT_TTL, RETRY_INTERVALS, get_queue
+from app.queues import (
+    FAILURE_TTL,
+    JOB_TIMEOUT,
+    MAX_RETRIES,
+    QUEUE_INTERACTIVE,
+    RESULT_TTL,
+    RETRY_INTERVALS,
+    get_queue,
+)
 from app.schemas import JobResponse, JobSubmitRequest
 from app.security import current_user
 
@@ -100,7 +108,11 @@ def submit_job(
     from rq import Retry
 
     try:
-        rq_job = get_queue().enqueue(
+        # `interactive`, because a human submitted this one URL and is
+        # watching for the result. The same function runs on `ingest` when a
+        # batch upload produces it -- identical work, different urgency, and
+        # the queue is the only thing that carries that distinction.
+        rq_job = get_queue(QUEUE_INTERACTIVE).enqueue(
             "app.workers.tasks.process_job_url",
             job.id,
             retry=Retry(max=MAX_RETRIES, interval=RETRY_INTERVALS),

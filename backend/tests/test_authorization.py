@@ -125,7 +125,9 @@ class TestJobOwnership:
         recorded = []
         monkeypatch.setattr(
             "app.routers.jobs.get_queue",
-            lambda: type("Q", (), {"enqueue": lambda self, *a, **k: recorded.append(a)})(),
+            lambda name=None: type(
+                "Q", (), {"enqueue": lambda self, *a, **k: recorded.append(a)}
+            )(),
         )
         profile_id = _make_profile(owner.id)
         as_user(intruder)
