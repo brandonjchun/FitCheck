@@ -43,9 +43,8 @@ from app.models import (
 from app.providers import LLMError, LLMPermanentError
 from app.scoring import (
     SCORER_VERSION,
-    SEMANTIC_WEIGHT,
-    SKILL_WEIGHT,
     blend,
+    build_breakdown,
     score_skills,
 )
 from app.workers.extract import extract_posting, extract_profile
@@ -557,37 +556,9 @@ def score_posting_for_profile(
         breakdown = score_skills(posting.skills, profile.skills)
         final = blend(semantic, breakdown.score)
 
-        payload = {
-            "semantic_score": round(semantic, 6),
-            "skill_score": round(breakdown.score, 6),
-            "final_score": round(final, 6),
-            "skills": [
-                {
-                    "name": v.name,
-                    "necessity": v.necessity,
-                    "bucket": v.bucket,
-                    "required_years": v.required_years,
-                    "candidate_years": v.candidate_years,
-                    "evidence": v.evidence,
-                }
-                for v in breakdown.verdicts
-            ],
-            "counts": {
-                "matched": len(breakdown.matched),
-                "partial": len(breakdown.partial),
-                "missing": len(breakdown.missing),
-                "missing_required": len(breakdown.missing_required),
-            },
-            # Stored in the row rather than read from the constants at display
-            # time, so an old match still explains itself under the weights it
-            # was actually scored with.
-            "weights": {"semantic": SEMANTIC_WEIGHT, "skill": SKILL_WEIGHT},
-            # True when the posting could not be extracted, so the skill half
-            # is empty and the score is semantic-only. Without this the UI
-            # would render a confident 0.4 with no skills listed and no way
-            # to tell that from a genuine total mismatch.
-            "extraction_failed": failure is not None,
-        }
+        payload = build_breakdown(
+            semantic, breakdown, extraction_failed=failure is not None
+        )
 
         # Upsert rather than insert. Re-scoring is normal -- a version bump, a
         # re-extraction, a redelivered job -- and appending would put one

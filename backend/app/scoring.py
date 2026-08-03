@@ -235,3 +235,55 @@ def blend(semantic: float, skill: float) -> float:
     """
     combined = SEMANTIC_WEIGHT * semantic + SKILL_WEIGHT * skill
     return max(0.0, min(1.0, combined))
+
+
+def build_breakdown(
+    semantic: float,
+    skill: SkillBreakdown,
+    *,
+    extraction_failed: bool = False,
+) -> dict:
+    """Assemble the JSONB explanation stored on a match.
+
+    Extracted here rather than left inline in the scoring task because M9 has
+    a second caller: the recommender reranks ~200 candidates per profile and
+    has to produce byte-identical payloads to the ones Path A writes. Two
+    copies of this dict would drift, and the drift would be invisible --
+    both feeds would render, one would quietly be missing a field the UI
+    reads with `.get`.
+
+    The rounding is deliberate at six places. These are floats being written
+    to JSONB and then compared in tests; full repr precision makes an
+    equality assertion depend on the platform's last bit.
+    """
+    return {
+        "semantic_score": round(semantic, 6),
+        "skill_score": round(skill.score, 6),
+        "final_score": round(blend(semantic, skill.score), 6),
+        "skills": [
+            {
+                "name": v.name,
+                "necessity": v.necessity,
+                "bucket": v.bucket,
+                "required_years": v.required_years,
+                "candidate_years": v.candidate_years,
+                "evidence": v.evidence,
+            }
+            for v in skill.verdicts
+        ],
+        "counts": {
+            "matched": len(skill.matched),
+            "partial": len(skill.partial),
+            "missing": len(skill.missing),
+            "missing_required": len(skill.missing_required),
+        },
+        # Stored in the row rather than read from the constants at display
+        # time, so an old match still explains itself under the weights it
+        # was actually scored with.
+        "weights": {"semantic": SEMANTIC_WEIGHT, "skill": SKILL_WEIGHT},
+        # True when the posting could not be extracted, so the skill half is
+        # empty and the score is semantic-only. Without this the UI would
+        # render a confident 0.4 with no skills listed and no way to tell
+        # that from a genuine total mismatch.
+        "extraction_failed": extraction_failed,
+    }
