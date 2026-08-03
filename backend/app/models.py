@@ -277,6 +277,84 @@ def hash_url(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+def canonical_key_for_url(url: str) -> str:
+    """Global dedupe key for a user-submitted one-off URL.
+
+    Namespaced `url:` because crawled postings will key as
+    `{source_kind}:{board_token}:{external_id}` at M8. Keeping both in one
+    column with distinct prefixes is what lets a posting submitted by hand
+    and the same posting found by the crawler collapse onto one row.
+
+    Hashed rather than stored raw: URLs can exceed the btree index entry
+    limit, and a fixed-width key keeps the unique index small.
+
+    Note the difference from `hash_url`. That one deliberately does not
+    normalize, which was right when the key was per-profile -- erring toward
+    re-fetching rather than serving the wrong cached posting. This key is
+    global, so un-normalized would mean the same posting stored twice under
+    two tracking URLs and extracted twice at full LLM cost. The reasoning
+    inverts with the scope of the key.
+    """
+    from app.urls import normalize_url
+
+    normalized = normalize_url(url) or url.strip()
+    return f"url:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
+
+
+class JobPosting(Base):
+    """One job posting: the thing a person applies to.
+
+    A *result* record, as opposed to Job's *work* record (spec section 5.6).
+    It exists only on a successful fetch, and it outlives any individual
+    attempt -- at M8 one posting is re-crawled dozens of times over its life,
+    each crawl a new Job row against this same posting.
+
+    Decoupled from any user on purpose. Two people submitting the same
+    Greenhouse posting must land on one row, or the crawler creates a third.
+    """
+
+    __tablename__ = "job_postings"
+    __table_args__ = (
+        # Global, not per-user. This is the constraint that makes the catalog
+        # a catalog rather than a pile of per-profile copies.
+        UniqueConstraint("canonical_key", name="job_postings_canonical_uniq"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    canonical_key: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # SHA-256 of the normalized text. The M8 content-hash gate compares this
+    # to decide whether a re-crawl needs to pay for extraction and embedding
+    # again, which is what makes a daily crawl cheap. Stored from M5 so the
+    # gate has history to compare against the first time it runs.
+    content_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Populated by extraction at M7. Present now so the fetch has somewhere to
+    # write and the M7 diff is scoring rather than a schema change.
+    extracted: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    extraction_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    company: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # Updated on every successful re-fetch, including one that skips
+    # extraction because the hash matched. This is the heartbeat that closure
+    # detection reads at M8.
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<JobPosting id={self.id} url={self.url!r}>"
+
+
 class Job(Base):
     """One submitted job-posting URL: the unit of asynchronous work.
 
@@ -330,6 +408,16 @@ class Job(Base):
 
     url: Mapped[str] = mapped_column(Text, nullable=False)
     url_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # The posting this work produced, set on success. Null while queued, and
+    # null forever for a job that never succeeded -- which is precisely the
+    # work-record/result-record split: the attempt is recorded either way,
+    # the posting only exists if there was something to record.
+    job_posting_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("job_postings.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

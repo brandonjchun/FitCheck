@@ -1,0 +1,251 @@
+"""Fetching a job posting: politely, with bounded cost, classifying failures.
+
+Three concerns, in the order they bite.
+
+**Politeness.** robots.txt is honoured and cached per host, the User-Agent
+identifies the bot with a contact route, and every request passes a
+cross-process rate limiter first. Path A makes one request when a human
+clicks a button; a batch upload makes hundreds unattended, so none of this is
+optional once M4's fan-out exists.
+
+**Bounded cost.** Separate connect and read timeouts, a byte cap enforced
+*while streaming* rather than from a header a server can omit or lie about,
+and a redirect limit. Without these one pathological URL occupies a worker
+for the full job timeout.
+
+**Classification.** Every failure is sorted into "retry this" or "never retry
+this" before it leaves this module. A 404 retried three times wastes two
+minutes and a worker slot on something that cannot succeed, and the caller
+should not have to know that an httpx.ReadTimeout is worth another attempt
+while a 410 is not.
+"""
+
+import logging
+import urllib.robotparser
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
+from selectolax.parser import HTMLParser
+
+from app.config import settings
+from app.queues import get_redis
+from app.ratelimit import RateLimiter, domain_of
+
+logger = logging.getLogger(__name__)
+
+_ROBOTS_CACHE_PREFIX = "robots:"
+
+# Status codes worth another attempt. 429 and 5xx are the host saying "not
+# now" rather than "no"; 408 is an explicit request timeout.
+_TRANSIENT_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504, 507, 509})
+
+# Content types we can extract text from. Anything else -- a PDF job
+# description, an image, a zip -- is a permanent failure for this pipeline
+# rather than something to retry.
+_TEXT_CONTENT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
+
+# Elements whose text is never part of a job posting. Removed before
+# extraction because selectolax's text() would otherwise return minified
+# JavaScript and CSS rules alongside the prose, which wrecks both the
+# extraction prompt and the content hash.
+_NOISE_SELECTORS = (
+    "script",
+    "style",
+    "noscript",
+    "template",
+    "svg",
+    "iframe",
+    "nav",
+    "footer",
+    "header",
+)
+
+
+class FetchError(Exception):
+    """Base for every failure originating from fetching a URL."""
+
+
+class TransientFetchError(FetchError):
+    """Worth retrying: timeout, connection reset, 429, 5xx.
+
+    The distinction this carries is the whole reason the class exists -- the
+    worker decides between backoff and dead-letter purely from the type.
+    """
+
+
+class PermanentFetchError(FetchError):
+    """Never worth retrying: 404, 410, robots disallow, wrong content type.
+
+    Retrying a 404 three times spends two minutes and a worker slot learning
+    what the first attempt already established.
+    """
+
+
+class RateLimitedError(TransientFetchError):
+    """Could not get a rate-limit token within the budget.
+
+    Transient by inheritance, and genuinely so: the work is legitimate and
+    merely early. Releasing the worker and letting backoff reschedule is
+    ordinary backpressure -- a worker parked on a full bucket is a worker
+    doing nothing, and under a 500-URL batch against one host that would
+    stall every other queue too.
+    """
+
+
+def _robots_url(url: str) -> str:
+    parts = urlsplit(url)
+    return urlunsplit((parts.scheme, parts.netloc, "/robots.txt", "", ""))
+
+
+def _load_robots(url: str, client: httpx.Client) -> urllib.robotparser.RobotFileParser:
+    """Fetch and parse robots.txt for this URL's host, cached in Redis.
+
+    Cached across processes, not just within one, because the cost being
+    avoided is a request to someone else's server. A per-process cache would
+    still mean N fetches of robots.txt for N workers on the same board.
+
+    A robots.txt that cannot be fetched is treated as permissive. That is the
+    conventional reading -- absence of a policy is not a prohibition -- and
+    the alternative would make one 500 on a robots file block an entire
+    board indefinitely.
+    """
+    host = domain_of(url)
+    cache_key = f"{_ROBOTS_CACHE_PREFIX}{host}"
+    redis = get_redis()
+
+    cached = redis.get(cache_key)
+    if cached is not None:
+        body = cached.decode("utf-8", errors="replace")
+    else:
+        try:
+            response = client.get(_robots_url(url))
+            body = response.text if response.status_code == 200 else ""
+        except httpx.HTTPError as exc:
+            logger.info("robots: could not fetch for %s (%s); treating as allow", host, exc)
+            body = ""
+
+        redis.set(cache_key, body.encode("utf-8"), ex=settings.robots_cache_seconds)
+
+    parser = urllib.robotparser.RobotFileParser()
+    parser.parse(body.splitlines())
+    return parser
+
+
+def is_allowed(url: str, client: httpx.Client) -> bool:
+    """Whether robots.txt permits us to fetch `url`."""
+    try:
+        return _load_robots(url, client).can_fetch(settings.fetch_user_agent, url)
+    except Exception as exc:
+        # A malformed robots.txt should not take down ingestion. Log and
+        # allow, matching the treatment of an unfetchable one.
+        logger.warning("robots: parse failed for %s (%s); treating as allow", url, exc)
+        return True
+
+
+def html_to_text(html: str) -> str:
+    """Reduce an HTML document to the text a human would read.
+
+    selectolax rather than BeautifulSoup: this runs on every posting a crawl
+    touches, and the parser is roughly an order of magnitude faster on the
+    same input.
+
+    Noise elements are stripped first. Without that, `text()` returns the
+    contents of every <script> tag, which both derails the extraction prompt
+    and makes the content hash change whenever a site's analytics bundle is
+    rebuilt -- defeating the M8 gate that exists to avoid re-extracting
+    unchanged postings.
+    """
+    tree = HTMLParser(html)
+
+    for selector in _NOISE_SELECTORS:
+        for node in tree.css(selector):
+            node.decompose()
+
+    if tree.body is None:
+        return ""
+
+    text = tree.body.text(separator="\n", strip=True)
+
+    # Collapse runs of blank lines. HTML layout produces a lot of them, and
+    # they are pure token cost in the extraction prompt.
+    lines = [line.strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _classify_status(status: int, url: str) -> FetchError:
+    if status in _TRANSIENT_STATUSES:
+        return TransientFetchError(f"HTTP {status} fetching {url}")
+    return PermanentFetchError(f"HTTP {status} fetching {url}")
+
+
+def fetch_posting_text(url: str, limiter: RateLimiter | None = None) -> str:
+    """Fetch `url` and return its readable text.
+
+    Raises:
+        RateLimitedError: no rate-limit token available within the budget.
+        PermanentFetchError: robots disallow, 4xx, or a non-text response.
+        TransientFetchError: timeout, connection failure, 429, or 5xx.
+    """
+    limiter = limiter if limiter is not None else RateLimiter()
+    host = domain_of(url)
+
+    timeout = httpx.Timeout(
+        connect=settings.fetch_connect_timeout,
+        read=settings.fetch_read_timeout,
+        write=settings.fetch_read_timeout,
+        pool=settings.fetch_connect_timeout,
+    )
+
+    with httpx.Client(
+        timeout=timeout,
+        follow_redirects=True,
+        max_redirects=settings.fetch_max_redirects,
+        headers={
+            "User-Agent": settings.fetch_user_agent,
+            "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
+        },
+    ) as client:
+        # robots before the rate limiter, so a disallowed URL does not spend a
+        # token it was never going to use.
+        if not is_allowed(url, client):
+            raise PermanentFetchError(f"robots.txt disallows fetching {url}")
+
+        if not limiter.acquire(host):
+            raise RateLimitedError(f"rate limit budget exhausted for {host}")
+
+        try:
+            # Streamed, so the byte cap can abort mid-response. A non-streaming
+            # get() has already read the whole body into memory by the time
+            # any size check could run, which makes the cap decorative.
+            with client.stream("GET", url) as response:
+                if response.status_code >= 400:
+                    raise _classify_status(response.status_code, url)
+
+                content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                if content_type and not content_type.startswith(_TEXT_CONTENT_TYPES):
+                    raise PermanentFetchError(
+                        f"unsupported content type {content_type!r} at {url}"
+                    )
+
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > settings.fetch_max_bytes:
+                        raise PermanentFetchError(
+                            f"response exceeded {settings.fetch_max_bytes} bytes at {url}"
+                        )
+                    chunks.append(chunk)
+
+                body = b"".join(chunks)
+                encoding = response.encoding or "utf-8"
+
+        except httpx.TooManyRedirects as exc:
+            # Permanent: a redirect loop is a property of the site, and the
+            # next attempt walks the identical loop.
+            raise PermanentFetchError(f"too many redirects for {url}") from exc
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise TransientFetchError(f"{type(exc).__name__} fetching {url}: {exc}") from exc
+
+    html = body.decode(encoding, errors="replace")
+    return html_to_text(html)

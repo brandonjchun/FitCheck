@@ -10,9 +10,10 @@ import pytest
 
 from app.db import SessionLocal
 from app.extraction import CURRENT_EXTRACTION_VERSION, ExtractedProfile
-from app.models import Job, Profile, hash_url
+from app.models import Job, JobPosting, Profile, hash_url
 from app.providers import LLMPermanentError, LLMTransientError
 from app.workers import tasks
+from app.workers.fetch import PermanentFetchError, TransientFetchError
 
 
 @pytest.fixture
@@ -187,8 +188,26 @@ class TestExtractProfileTask:
         assert tasks.extract_profile_task(99_999_999) == "profile_missing"
 
 
+@pytest.fixture
+def fetched(monkeypatch):
+    """Stub the network at the task boundary.
+
+    fetch_posting_text has its own tests against httpx.MockTransport; what
+    these exercise is the state machine around it. Before M5 this file
+    needed no such fixture, because the fetch was a no-op -- these two tests
+    were quietly passing by not doing anything.
+    """
+
+    def install(text: str = "Senior Engineer\nWe need Python."):
+        monkeypatch.setattr(tasks, "fetch_posting_text", lambda url: text)
+        return text
+
+    install()
+    return install
+
+
 class TestProcessJobUrl:
-    def test_transitions_to_succeeded_and_counts_the_attempt(self, job_id):
+    def test_transitions_to_succeeded_and_counts_the_attempt(self, fetched, job_id):
         tasks.process_job_url(job_id)
 
         db = SessionLocal()
@@ -198,18 +217,180 @@ class TestProcessJobUrl:
             assert job.attempts == 1
             assert job.last_error is None
             assert job.is_terminal is True
+            # The result record the work produced.
+            assert job.job_posting_id is not None
         finally:
             db.close()
 
-    def test_second_run_does_not_re_process(self, job_id):
-        """At M4 a re-run means a second HTTP request to someone else's
-        server. The guard is what makes at-least-once delivery safe."""
+    def test_stores_the_fetched_posting(self, fetched, job_id):
+        fetched("Staff Engineer\nRust and Postgres.")
+        tasks.process_job_url(job_id)
+
+        db = SessionLocal()
+        try:
+            job = db.get(Job, job_id)
+            posting = db.get(JobPosting, job.job_posting_id)
+            assert "Rust and Postgres." in posting.raw_text
+            assert posting.canonical_key.startswith("url:")
+            assert posting.content_hash
+        finally:
+            db.close()
+
+    def test_second_run_does_not_re_process(self, fetched, job_id):
+        """A re-run means a second HTTP request to someone else's server.
+        The guard is what makes at-least-once delivery safe."""
         tasks.process_job_url(job_id)
         assert tasks.process_job_url(job_id) == "already_done"
 
         db = SessionLocal()
         try:
             assert db.get(Job, job_id).attempts == 1  # not incremented twice
+        finally:
+            db.close()
+
+    def test_permanent_failure_is_dead_without_retrying(
+        self, monkeypatch, fetched, job_id
+    ):
+        """Not re-raised, so RQ's retry policy never fires.
+
+        Three attempts at a 404 spend four minutes of worker time
+        re-establishing what the first one already settled. And `dead` on
+        attempt one is correct -- a 404 is as final then as on attempt three,
+        so leaving it `failed` would misreport it to a requeue sweep.
+        """
+
+        def gone(url):
+            raise PermanentFetchError("HTTP 404 fetching ...")
+
+        monkeypatch.setattr(tasks, "fetch_posting_text", gone)
+
+        assert tasks.process_job_url(job_id) == "permanent_failure"
+
+        db = SessionLocal()
+        try:
+            job = db.get(Job, job_id)
+            assert job.status == "dead"
+            assert job.attempts == 1
+            assert "404" in job.last_error
+        finally:
+            db.close()
+
+    def test_transient_failure_propagates_so_rq_retries(
+        self, monkeypatch, fetched, job_id
+    ):
+        def flaky(url):
+            raise TransientFetchError("timeout")
+
+        monkeypatch.setattr(tasks, "fetch_posting_text", flaky)
+
+        with pytest.raises(TransientFetchError):
+            tasks.process_job_url(job_id)
+
+        db = SessionLocal()
+        try:
+            assert db.get(Job, job_id).status == "failed"  # not dead, will retry
+        finally:
+            db.close()
+
+    def test_page_with_no_readable_text_is_dead(self, monkeypatch, fetched, job_id):
+        """The HTML analogue of a scanned PDF -- usually a JavaScript-rendered
+        posting this fetcher cannot see. Retrying re-downloads the same
+        empty document."""
+        monkeypatch.setattr(tasks, "fetch_posting_text", lambda url: "   \n  ")
+
+        assert tasks.process_job_url(job_id) == "no_content"
+
+        db = SessionLocal()
+        try:
+            assert db.get(Job, job_id).status == "dead"
+        finally:
+            db.close()
+
+    def test_two_jobs_for_one_url_share_a_posting(self, fetched, make_user):
+        """Global dedupe on canonical_key: the catalog holds one row.
+
+        Two users submitting the same posting must not create two postings,
+        or the crawler will later create a third.
+        """
+        url = "https://example.com/shared-posting"
+        job_ids = []
+
+        for _ in range(2):
+            user = make_user()
+            db = SessionLocal()
+            try:
+                profile = Profile(
+                    user_id=user.id, original_filename="r.pdf", raw_text="text"
+                )
+                db.add(profile)
+                db.commit()
+                db.refresh(profile)
+                job = Job(
+                    profile_id=profile.id,
+                    url=url,
+                    url_hash=hash_url(url),
+                    status="queued",
+                )
+                db.add(job)
+                db.commit()
+                db.refresh(job)
+                job_ids.append(job.id)
+            finally:
+                db.close()
+
+        for job_id in job_ids:
+            tasks.process_job_url(job_id)
+
+        db = SessionLocal()
+        try:
+            postings = {db.get(Job, jid).job_posting_id for jid in job_ids}
+            assert len(postings) == 1
+        finally:
+            db.close()
+
+    def test_tracking_params_collapse_onto_one_posting(self, fetched, make_user):
+        """The reason canonical_key normalizes and hash_url does not.
+
+        Two submissions of one posting under different campaign URLs are one
+        posting -- otherwise the catalog doubles and so does the extraction
+        bill at M7.
+        """
+        urls = [
+            "https://example.com/p/9?utm_source=news",
+            "https://example.com/p/9?utm_source=twitter",
+        ]
+        job_ids = []
+
+        for url in urls:
+            user = make_user()
+            db = SessionLocal()
+            try:
+                profile = Profile(
+                    user_id=user.id, original_filename="r.pdf", raw_text="text"
+                )
+                db.add(profile)
+                db.commit()
+                db.refresh(profile)
+                job = Job(
+                    profile_id=profile.id,
+                    url=url,
+                    url_hash=hash_url(url),
+                    status="queued",
+                )
+                db.add(job)
+                db.commit()
+                db.refresh(job)
+                job_ids.append(job.id)
+            finally:
+                db.close()
+
+        for job_id in job_ids:
+            tasks.process_job_url(job_id)
+
+        db = SessionLocal()
+        try:
+            postings = {db.get(Job, jid).job_posting_id for jid in job_ids}
+            assert len(postings) == 1
         finally:
             db.close()
 
