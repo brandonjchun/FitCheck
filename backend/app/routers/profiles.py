@@ -2,23 +2,19 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.documents import DocumentError, extract_text
-from app.extraction import ExtractedProfile
 from app.models import Profile
-from app.providers import LLMError
+from app.queue import FAILURE_TTL, JOB_TIMEOUT, RESULT_TTL, get_queue
 from app.schemas import ProfileUploadResponse
-from app.workers.extract import extract_profile
 
 logger = logging.getLogger(__name__)
 
 # A router is a mountable group of routes. main.py calls
 # app.include_router(profiles.router), which is what makes these paths live.
-# The prefix and tags apply to every route defined below; tags become the
-# section headings in the Swagger UI at /docs.
 router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 
 
@@ -27,13 +23,17 @@ def upload_resume(
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ) -> Profile:
-    """Accept a resume upload, extract its text and structure, and store it.
+    """Accept a resume upload, store its text, and queue structured extraction.
 
-    Returns 201 with the new row's id. Structured extraction is best-effort:
-    if the LLM provider fails, the profile is still persisted with its raw
-    text and `extraction_ok: false`, and can be re-extracted later. Losing a
-    successfully parsed document because a third party was unavailable would
-    be the wrong trade.
+    Text extraction is synchronous -- it is local CPU work measured in
+    milliseconds. LLM extraction is not: it measured 26s on Gemini and 57s on
+    a local model, and it used to run right here, holding the request open
+    the entire time. It is now enqueued instead.
+
+    So this returns 201, not 202. A profile really is created and immediately
+    readable at GET /api/profiles/{id}; only its structured fields arrive
+    later. `extraction_ok` is false until the worker finishes, and the client
+    polls that endpoint the same way it polls a job.
     """
     if file.filename is None:
         raise HTTPException(status_code=400, detail="No filename provided")
@@ -46,28 +46,68 @@ def upload_resume(
     except DocumentError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    extracted: ExtractedProfile | None = None
-    try:
-        extracted = extract_profile(raw_text)
-    except LLMError as e:
-        # Both transient and permanent land here. Neither should cost the
-        # user their upload -- the text parsed fine, and that is the
-        # expensive, irreplaceable part.
-        logger.warning("extraction failed for %s: %s", file_name, e)
-
-    profile = Profile(
-        original_filename=file_name,
-        raw_text=raw_text,
-        # model_dump(mode="json") because JSONB cannot store Python floats
-        # inside Pydantic objects directly -- this produces plain dicts,
-        # lists, and scalars that psycopg can serialize.
-        extracted=extracted.model_dump(mode="json") if extracted else None,
-        seniority=extracted.seniority if extracted else None,
-        years_experience=extracted.total_years_experience if extracted else None,
-    )
-
+    profile = Profile(original_filename=file_name, raw_text=raw_text)
     db.add(profile)
     db.commit()
     db.refresh(profile)
+
+    # Enqueue after commit, for the same reason as job submission: a worker
+    # must never look up a row that has not been written yet.
+    try:
+        get_queue().enqueue(
+            "app.workers.tasks.extract_profile_task",
+            profile.id,
+            job_timeout=JOB_TIMEOUT,
+            result_ttl=RESULT_TTL,
+            failure_ttl=FAILURE_TTL,
+        )
+    except Exception as exc:
+        # Redis down must not cost the user their upload. The row persists
+        # with extracted=NULL, which is the same state a failed extraction
+        # leaves behind and which a re-extraction sweep can find.
+        logger.error("upload_resume: enqueue failed for profile %s: %s", profile.id, exc)
+
+    return profile
+
+
+@router.get("/{profile_id}", response_model=ProfileUploadResponse)
+def get_profile(
+    profile_id: int, response: Response, db: Session = Depends(get_db)
+) -> Profile:
+    """Fetch one profile. Polled until `extraction_ok` turns true."""
+    profile = db.get(Profile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile {profile_id} not found")
+
+    response.headers["Cache-Control"] = "no-store"
+    return profile
+
+
+@router.post("/{profile_id}/extract", response_model=ProfileUploadResponse, status_code=202)
+def reextract_profile(profile_id: int, db: Session = Depends(get_db)) -> Profile:
+    """Re-run extraction for a profile whose earlier attempt failed.
+
+    Closes the gap where a provider outage left a profile permanently
+    un-scoreable with no way to retry it. Safe to call on an
+    already-extracted profile: the task checks and returns early rather than
+    spending a second API call.
+    """
+    profile = db.get(Profile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile {profile_id} not found")
+
+    try:
+        get_queue().enqueue(
+            "app.workers.tasks.extract_profile_task",
+            profile.id,
+            job_timeout=JOB_TIMEOUT,
+            result_ttl=RESULT_TTL,
+            failure_ttl=FAILURE_TTL,
+        )
+    except Exception as exc:
+        logger.error("reextract_profile: enqueue failed for %s: %s", profile_id, exc)
+        raise HTTPException(
+            status_code=503, detail="Queue unavailable; try again shortly"
+        ) from exc
 
     return profile

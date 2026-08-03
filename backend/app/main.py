@@ -7,7 +7,7 @@ Business logic does not live here -- this module wires things together.
 from fastapi import FastAPI
 
 from app.middleware import BodySizeLimitMiddleware
-from app.routers import profiles
+from app.routers import jobs, profiles
 
 app = FastAPI(
     title="FitCheck",
@@ -41,3 +41,4 @@ def health() -> dict[str, str]:
 
 
 app.include_router(profiles.router)
+app.include_router(jobs.router)

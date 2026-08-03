@@ -1,6 +1,7 @@
 # Local development infrastructure. Postgres for durable state, Redis as the
-# queue broker. Both run in Linux containers, which is how they run in
-# production -- no Windows-specific builds or ports involved.
+# queue broker, and worker processes that run the slow work. Everything runs
+# in Linux containers, which is how these run in production -- no
+# Windows-specific builds or ports involved.
 
 services:
   postgres:
@@ -36,6 +37,45 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  worker:
+    # Runs on Linux so RQ can fork a child process per job. On Windows the
+    # host would need SimpleWorker, which executes jobs in-process and loses
+    # the crash isolation that forking provides.
+    build:
+      context: ./backend
+    depends_on:
+      # Wait for readiness, not just "container started". Postgres accepts
+      # connections several seconds after the process launches, and a worker
+      # that starts inside that gap dies on its first query.
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      # Picks up LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_MODEL.
+      # Compose only auto-loads a .env at the project root, and this one
+      # lives under backend/, so it has to be named explicitly.
+      - ./backend/.env
+    environment:
+      # These override env_file (explicit `environment` wins) because the
+      # values in .env are written for a process running on the Windows host
+      # and are wrong inside the compose network.
+      #
+      # Service names, not localhost: `postgres` and `redis` resolve to the
+      # sibling containers. A worker pointed at localhost would be looking at
+      # itself and find nothing listening.
+      DATABASE_URL: postgresql+psycopg://fitcheck:devpassword@postgres:5432/fitcheck
+      REDIS_URL: redis://redis:6379/0
+      # Ollama runs on the Windows host, not in this container.
+      # host.docker.internal is how a container reaches back out to it.
+      OLLAMA_HOST: http://host.docker.internal:11434
+    extra_hosts:
+      # Required on Linux hosts; a no-op but harmless on Docker Desktop.
+      - "host.docker.internal:host-gateway"
+    # Concurrency is the number of worker processes. Raise this to watch a
+    # burst drain in parallel: `docker compose up -d --scale worker=3`.
+    restart: unless-stopped
 
 volumes:
   pgdata:

@@ -7,9 +7,10 @@ profile; all three change for different reasons.
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from app.extraction import Seniority
+from app.models import JobStatus
 
 
 class ExtractedSkill(BaseModel):
@@ -48,3 +49,37 @@ class ProfileUploadResponse(BaseModel):
     skills: list[ExtractedSkill] = []
 
     raw_text: str
+
+
+class JobSubmitRequest(BaseModel):
+    """Body of POST /api/jobs.
+
+    `HttpUrl` is doing real work here: a malformed URL is rejected with a
+    field-level 422 before any row is written or any job enqueued. Without
+    it, the bad value reaches a worker minutes later and fails there, which
+    is a far worse place to discover a typo.
+    """
+
+    url: HttpUrl
+    profile_id: int
+    notes: str | None = Field(default=None, max_length=500)
+
+
+class JobResponse(BaseModel):
+    """A job's current state. This is what the frontend polls."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    profile_id: int
+    url: str
+    status: JobStatus
+    attempts: int
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    # Lets the client stop polling without hardcoding which statuses are
+    # terminal. Duplicating that set in the frontend guarantees the two drift
+    # the first time a state is added.
+    is_terminal: bool

@@ -5,14 +5,35 @@ rename here should not be a breaking API change, and internal columns should
 not leak to clients by default.
 """
 
+import hashlib
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
-from sqlalchemy import BigInteger, DateTime, Numeric, Text, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+
+# The job lifecycle from spec section 6.3. Stored as text rather than a
+# Postgres enum: adding a state to a text column is a no-op, while adding one
+# to an enum type requires ALTER TYPE and a migration that cannot run inside a
+# transaction on older Postgres. The tradeoff is that the database will not
+# reject a typo -- the Literal and the API schema are what enforce it.
+JobStatus = Literal["queued", "running", "succeeded", "failed", "dead"]
+
+TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "dead"})
 
 
 class Profile(Base):
@@ -80,3 +101,98 @@ class Profile(Base):
 
     def __repr__(self) -> str:
         return f"<Profile id={self.id} file={self.original_filename!r}>"
+
+
+def hash_url(url: str) -> str:
+    """Stable dedupe key for a URL.
+
+    Hashed rather than storing the raw URL in the unique index because URLs
+    can exceed the ~2704-byte limit of a btree index entry, and a fixed-width
+    key keeps the index small. SHA-256 rather than MD5 only because there is
+    no reason to pick the weaker one; collision resistance is not really the
+    property being relied on here.
+
+    Deliberately NOT normalized (no lowercasing, no query-param sorting, no
+    trailing-slash stripping). Two URLs differing only in a tracking param
+    will be treated as different jobs. Normalizing correctly is genuinely
+    hard -- ?page=2 matters, ?utm_source=x does not, and no generic rule
+    tells them apart -- so this errs toward re-fetching rather than toward
+    silently returning the wrong cached posting.
+    """
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+class Job(Base):
+    """One submitted job-posting URL: the unit of asynchronous work.
+
+    Separate from JobPosting on purpose (spec section 5.2). This is a *work
+    record* -- it exists the instant a URL is submitted and survives every
+    attempt failing. JobPosting is a *result record* and exists only on
+    success. Collapsing them would mean one table with half its columns null
+    most of the time, and would make "show me everything that failed" a query
+    against a table that is conceptually about postings.
+
+    This separation is also why the ops dashboard in M8 is cheap to build:
+    this table IS the audit log.
+    """
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        # Enforced in the database, not the application. An application-level
+        # "does this already exist?" check races: two concurrent submissions
+        # both read "no", both insert, and you have scraped the same page
+        # twice. The database is the only place this can be decided.
+        UniqueConstraint("profile_id", "url_hash", name="jobs_profile_url_uniq"),
+        # Postgres does NOT index foreign keys automatically (unlike primary
+        # keys). Without this, "all jobs for this profile" is a seq scan.
+        Index("ix_jobs_profile_id", "profile_id"),
+        # The ops dashboard's hot path: count/filter by state.
+        Index("ix_jobs_status", "status"),
+        Index("ix_jobs_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    profile_id: Mapped[int] = mapped_column(
+        BigInteger,
+        # CASCADE: a job is meaningless without the candidate it was submitted
+        # for, so deleting a profile should not leave orphaned work records.
+        ForeignKey("profiles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    url_hash: Mapped[str] = mapped_column(Text, nullable=False)
+
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+    # Truncated exception detail. Text rather than JSONB because nothing
+    # queries into it -- it is read by a human staring at a failed job.
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Correlates this row with RQ's own job record in Redis. Without it there
+    # is no way to go from "this database row is stuck" to "here is what the
+    # queue thinks is happening".
+    rq_job_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this job has reached a state it will never leave.
+
+        The frontend polls until this is true (spec section 7.2).
+        """
+        return self.status in TERMINAL_STATUSES
+
+    def __repr__(self) -> str:
+        return f"<Job id={self.id} status={self.status!r} url={self.url!r}>"
