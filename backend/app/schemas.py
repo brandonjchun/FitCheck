@@ -9,7 +9,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
-from app.extraction import Seniority
+from app.extraction import Seniority, SkillSource
 from app.models import JobStatus
 
 
@@ -19,6 +19,14 @@ class ExtractedSkill(BaseModel):
     name: str
     years: float | None = None
     evidence: str | None = None
+
+    # Optional here even though the LLM contract makes it required, because
+    # this model is built from stored JSONB rather than from a fresh
+    # extraction. Profiles written before extraction version 3 have no
+    # `source` key, and a required field would turn every one of them into a
+    # 500 on read. Null means "extracted before this was captured", which is
+    # information the client can act on; a re-extraction fills it in.
+    source: SkillSource | None = None
 
 
 class ProfileUploadResponse(BaseModel):

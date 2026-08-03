@@ -97,3 +97,36 @@ def normalize_skills(names: list[str]) -> list[str]:
         result.append(canonical)
 
     return result
+
+
+def normalize_skill_items(items: list[dict]) -> list[dict]:
+    """Canonicalize stored skill objects, dropping blanks and duplicates.
+
+    The dict-shaped counterpart to normalize_skills, for the extraction blob
+    as it comes back out of JSONB. Only `name` is rewritten -- `years` and
+    `evidence` are carried through untouched, because evidence quotes the
+    resume verbatim and rewriting it would destroy the property that makes
+    the extraction auditable.
+
+    Applied on **read** rather than on write. Storing the canonical form and
+    discarding the original would mean every future addition to the alias map
+    requires re-running the LLM over every stored profile to take effect,
+    since the raw names it would need to re-map are gone. Normalizing here
+    instead makes an alias fix retroactive for free.
+
+    Duplicates collapse to the first occurrence, which is why order matters:
+    an LLM lists the most prominent skills first, so the first mention is
+    generally the better-evidenced one. Given "JS" with five years and
+    "JavaScript" with one, the five-year entry survives.
+    """
+    seen: set[str] = set()
+    result: list[dict] = []
+
+    for item in items:
+        canonical = normalize_skill(item.get("name", ""))
+        if not canonical or canonical in seen:
+            continue
+        seen.add(canonical)
+        result.append({**item, "name": canonical})
+
+    return result

@@ -46,6 +46,25 @@ def upload_resume(
     except DocumentError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    # A file can parse cleanly and still yield nothing: a PDF exported by a
+    # phone scanner app is images all the way down, and pdfplumber returns ""
+    # for it without erroring. 422 rather than 400 -- the request was
+    # well-formed and the file was a real PDF, the content is just unusable.
+    #
+    # Rejecting here rather than storing the row is what keeps `extraction_ok`
+    # meaningful downstream. The alternative was a profile with zero skills,
+    # no error, and no way for the client to tell that apart from a resume the
+    # model genuinely found nothing in.
+    if not raw_text.strip():
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "No text could be read from this document. If it is a scanned "
+                "or photographed resume, it has no text layer -- export a "
+                "text-based PDF or upload a DOCX instead."
+            ),
+        )
+
     profile = Profile(original_filename=file_name, raw_text=raw_text)
     db.add(profile)
     db.commit()

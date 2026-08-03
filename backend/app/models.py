@@ -25,6 +25,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+from app.extraction import CURRENT_EXTRACTION_VERSION
+from app.skills import normalize_skill_items
 
 # The job lifecycle from spec section 6.3. Stored as text rather than a
 # Postgres enum: adding a state to a text column is a no-op, while adding one
@@ -56,6 +58,15 @@ class Profile(Base):
         Numeric(4, 1), nullable=True
     )
 
+    # Which generation of the prompt and schema produced `extracted`. Null
+    # until extraction succeeds, and set in the same commit as the blob so the
+    # two can never disagree about which rules built it.
+    #
+    # A content hash cannot detect a prompt change, so without this a better
+    # prompt would leave every stored profile on the old behaviour with no way
+    # to find them. See extraction.CURRENT_EXTRACTION_VERSION.
+    extraction_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # embedding: vector(384) is added at M7, together with the pgvector
     # SQLAlchemy type. The extension is available in the image already.
 
@@ -83,21 +94,48 @@ class Profile(Base):
 
         Distinguishes "the LLM found no skills" from "the LLM never ran",
         which an empty skills list alone cannot.
+
+        That distinction only holds because a document with no extractable
+        text now raises rather than storing an empty result -- see
+        workers.extract.EmptyDocumentError. While that path returned a
+        populated-but-empty profile, this reported true for a scanned PDF the
+        model was never sent, which is precisely the case it exists to rule
+        out.
         """
         return self.extracted is not None
 
     @property
+    def extraction_is_current(self) -> bool:
+        """Whether `extracted` was produced by the current prompt and schema.
+
+        False for a profile extracted under an older generation. This is the
+        row-level form of the `WHERE extraction_version < CURRENT` sweep, and
+        what lets a re-extraction request tell "already done" apart from
+        "done, but by rules we have since replaced".
+        """
+        return (
+            self.extracted is not None
+            and self.extraction_version == CURRENT_EXTRACTION_VERSION
+        )
+
+    @property
     def skills(self) -> list[dict]:
-        """Skills from the extraction blob, for the API response.
+        """Skills from the extraction blob, canonicalized for the caller.
 
         Reads out of JSONB rather than a promoted column: skills are a list
         we display but never filter or join on, so denormalizing them into
         their own table would add a join for no query benefit. That changes
         at M7, when scoring needs set operations over them.
+
+        Normalization happens here rather than before the write, so the
+        column keeps the model's original spellings and an addition to the
+        alias map applies to every existing profile immediately -- no
+        backfill, no re-running the LLM. The cost is a dict lookup per skill
+        per read, against a list that is a few dozen entries long.
         """
         if not self.extracted:
             return []
-        return self.extracted.get("skills", [])
+        return normalize_skill_items(self.extracted.get("skills", []))
 
     def __repr__(self) -> str:
         return f"<Profile id={self.id} file={self.original_filename!r}>"

@@ -9,7 +9,7 @@ normal operation, not an edge case.
 import pytest
 
 from app.db import SessionLocal
-from app.extraction import ExtractedProfile
+from app.extraction import CURRENT_EXTRACTION_VERSION, ExtractedProfile
 from app.models import Job, Profile, hash_url
 from app.providers import LLMPermanentError, LLMTransientError
 from app.workers import tasks
@@ -61,12 +61,20 @@ def job_id(profile_id):
 def _fake_extraction(**overrides) -> ExtractedProfile:
     """Stands in for a completed extract_profile() call.
 
-    Skill names are already canonical here because normalization happens
-    *inside* extract_profile, which these tests replace. Normalization itself
-    is covered in test_skills.py.
+    Skill names happen to be canonical here, but nothing requires that any
+    more: extract_profile returns the model's raw output and canonicalization
+    happens on read, in Profile.skills. Normalization itself is covered in
+    test_skills.py.
     """
     base = {
-        "skills": [{"name": "Python", "years": 3.0, "evidence": "uses Python"}],
+        "skills": [
+            {
+                "name": "Python",
+                "years": 3.0,
+                "evidence": "uses Python",
+                "source": "experience",
+            }
+        ],
         "total_years_experience": 3.0,
         "seniority": "mid",
         "education": [],
@@ -89,6 +97,47 @@ class TestExtractProfileTask:
             assert profile.seniority == "mid"
             assert float(profile.years_experience) == 3.0
             assert profile.extracted["skills"][0]["name"] == "Python"
+            # Stamped in the same commit as the blob, so the two cannot
+            # disagree about which rules produced it.
+            assert profile.extraction_version == CURRENT_EXTRACTION_VERSION
+            assert profile.extraction_is_current is True
+        finally:
+            db.close()
+
+    def test_stale_extraction_is_redone(self, monkeypatch, profile_id):
+        """A version bump has to actually re-extract, or it is decorative.
+
+        Guarding the early return on `extracted is not None` alone would make
+        a prompt improvement unactionable: the sweep finds stale rows, the
+        task declines to touch them, and the column becomes a label nobody can
+        act on.
+        """
+        calls = []
+
+        def counting(text):
+            calls.append(text)
+            return _fake_extraction()
+
+        monkeypatch.setattr(tasks, "extract_profile", counting)
+
+        assert tasks.extract_profile_task(profile_id) == "extracted"
+
+        db = SessionLocal()
+        try:
+            profile = db.get(Profile, profile_id)
+            profile.extraction_version = CURRENT_EXTRACTION_VERSION - 1
+            db.commit()
+        finally:
+            db.close()
+
+        assert tasks.extract_profile_task(profile_id) == "extracted"
+        assert len(calls) == 2
+
+        db = SessionLocal()
+        try:
+            assert db.get(Profile, profile_id).extraction_version == (
+                CURRENT_EXTRACTION_VERSION
+            )
         finally:
             db.close()
 

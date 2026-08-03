@@ -22,6 +22,7 @@ from contextlib import contextmanager
 from sqlalchemy.orm import Session
 
 from app.db import SessionLocal
+from app.extraction import CURRENT_EXTRACTION_VERSION
 from app.models import Job, Profile
 from app.providers import LLMError, LLMPermanentError
 from app.workers.extract import extract_profile
@@ -52,13 +53,19 @@ def _session() -> Iterator[Session]:
 def extract_profile_task(profile_id: int) -> str:
     """Derive structured data for an already-uploaded resume.
 
-    Idempotent: if the profile already has an extraction, this returns
-    without calling the LLM. That check is what makes a duplicate delivery
-    free rather than a second API charge.
+    Idempotent: if the profile already has a current-generation extraction,
+    this returns without calling the LLM. That check is what makes a
+    duplicate delivery free rather than a second API charge.
+
+    The guard is on `extraction_is_current`, not merely on the blob being
+    present. A profile extracted under an older prompt has an extraction and
+    still needs a new one, so keying the early return on presence alone would
+    make a version bump unactionable -- the sweep would find stale rows and
+    the task would decline to do anything about them.
 
     Raises on transient failure so RQ retries. Returns normally on permanent
-    failure -- retrying a bad API key or an unknown model burns worker slots
-    on something that cannot succeed.
+    failure -- retrying a bad API key, an unknown model, or a resume with no
+    text layer burns worker slots on something that cannot succeed.
     """
     with _session() as db:
         profile = db.get(Profile, profile_id)
@@ -68,7 +75,7 @@ def extract_profile_task(profile_id: int) -> str:
             logger.warning("extract_profile_task: profile %s is gone", profile_id)
             return "profile_missing"
 
-        if profile.extracted is not None:
+        if profile.extraction_is_current:
             logger.info("extract_profile_task: profile %s already extracted", profile_id)
             return "already_done"
 
@@ -92,12 +99,18 @@ def extract_profile_task(profile_id: int) -> str:
         # this same profile while the LLM call was in flight. Last write wins
         # and both writes are equivalent, so this is belt-and-braces rather
         # than load-bearing -- but it keeps the "already done" path honest.
-        if profile.extracted is not None:
+        if profile.extraction_is_current:
             return "already_done"
 
+        # The blob holds exactly what the model returned, un-canonicalized.
+        # Skill names are normalized when read back (Profile.skills).
         profile.extracted = extracted.model_dump(mode="json")
         profile.seniority = extracted.seniority
         profile.years_experience = extracted.total_years_experience
+        # Written in the same commit as the blob. Setting it separately would
+        # allow a crash between the two to leave an extraction whose
+        # generation is unknown, which is worse than either value alone.
+        profile.extraction_version = CURRENT_EXTRACTION_VERSION
         db.commit()
 
     return "extracted"

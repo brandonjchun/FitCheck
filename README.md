@@ -119,7 +119,9 @@ PDF/DOCX upload → text extraction → structured candidate profile (skills wit
 
 Extraction is an LLM call against a constrained JSON schema, validated by Pydantic — not hand-rolled regex parsing, which breaks on the next file. Malformed model output is treated as a *retryable* error.
 
-Skill names are normalized through an alias map, so "JS", "Javascript", and "ECMAScript" collapse to one canonical token. Unglamorous and load-bearing: under Path B a bad alias map doesn't produce one wrong score, it produces a systematically wrong ranking across the whole catalog.
+Skill names are normalized through an alias map, so "JS", "Javascript", and "ECMAScript" collapse to one canonical token. Unglamorous and load-bearing: under Path B a bad alias map doesn't produce one wrong score, it produces a systematically wrong ranking across the whole catalog. Normalization runs on **read**, so the stored blob keeps the model's original spellings and an alias fix applies retroactively without re-running the LLM.
+
+Each skill also records **where it came from** — `experience`, `project`, `education`, or `skills_list`. Listing "Go" in a technologies section is a claim; shipping a service in Go is evidence, and weighting them identically is what resume keyword-stuffing relies on. When a skill appears in several places the strongest wins, so a skill demonstrated in a job bullet never reads as a bare list entry. On a sample resume this separated 20 keyword-list skills from 12 demonstrated ones, and every demonstrated skill also carried an inferred year count.
 
 ### 2. Job submission
 
@@ -310,7 +312,7 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 | --- | --- | --- | --- |
 | 1 | Environment | Docker up with pgvector; `/health` returns 200; Alembic runs | ✅ Done |
 | 2 | **M1** Resume ingestion | Upload PDF/DOCX → text extracted → `profiles` row → visible at `/docs` | ✅ Done |
-| 3 | **M2** Structured profile | LLM extraction validated by Pydantic; skill aliases normalized; `extraction_version` stored | ⚠️ Done except `extraction_version` |
+| 3 | **M2** Structured profile | LLM extraction validated by Pydantic; skill aliases normalized; `extraction_version` stored | ✅ Done |
 | 4 | **M3** Auth | Register/login/logout; Argon2id; Redis sessions; `owned_profile` dependency; another user's profile returns 404 | ❌ Not started |
 | 5–6 | **M4** Queues + batch | Four queues declared and separated; submit URL → `202`; `.txt` batch → N `ingest` jobs + one aggregate status endpoint, capped; polling UI | ⚠️ Half-built |
 | 7 | **M5** Real fetching | Robots, timeouts, size caps, Redis per-domain token bucket, HTML→text, URL normalization → `canonical_key` | ❌ Placeholder |
@@ -325,7 +327,9 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 
 ### What's actually in the repo today
 
-- **M1/M2 complete.** Resume upload, PDF/DOCX text extraction, LLM extraction behind a swappable provider seam (Gemini and Ollama), skill alias normalization, request size cap enforced in ASGI middleware, and a pytest suite covering documents, extraction, skills, providers, middleware, and endpoints. The one gap against v2 is `extraction_version` on `profiles` — one additive migration, no logic changes.
+- **M1/M2 complete.** Resume upload, PDF/DOCX text extraction, LLM extraction behind a swappable provider seam (Gemini and Ollama), skill alias normalization, `extraction_version` stamped on every extraction, request size cap enforced in ASGI middleware, and a 171-test pytest suite covering documents, extraction, skills, providers, middleware, and endpoints.
+
+  Two design points worth knowing. **Skill normalization happens on read, not on write** — `profiles.extracted` holds exactly what the model returned, so adding an alias applies retroactively to every stored profile with no backfill and no second LLM call. And **`extraction_version` is only bumped by prompt or schema changes**, not alias changes, because the latter no longer alter what was extracted.
 - **M4 half-built.** The endpoints, status machine, attempt counter, dedupe constraint, and retry policy are real and tested. Two things change: one `default` queue becomes four separated queues, and the batch endpoint doesn't exist yet.
 - **M5 is a deliberate placeholder.** `process_job_url` no-ops rather than faking a result, so the M5 diff reads as a feature rather than a refactor.
 - **No frontend yet.** M4 is where the polling UI lands.

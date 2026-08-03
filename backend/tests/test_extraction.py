@@ -14,17 +14,34 @@ import json
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from app.extraction import EducationItem, ExtractedProfile, SkillItem
+from app.extraction import (
+    CURRENT_EXTRACTION_VERSION,
+    EducationItem,
+    ExtractedProfile,
+    SkillItem,
+)
+from app.models import Profile
 from app.providers import LLMPermanentError, LLMTransientError
 from app.workers import extract as extract_module
-from app.workers.extract import MAX_RESUME_CHARS, extract_profile
+from app.workers.extract import EmptyDocumentError, MAX_RESUME_CHARS, extract_profile
 
 VALID_RESPONSE = json.dumps(
     {
         "skills": [
-            {"name": "JS", "years": 4.0, "evidence": "Built a React frontend in JS"},
-            {"name": "Rust", "years": None, "evidence": "Hobby projects in Rust"},
+            {
+                "name": "JS",
+                "years": 4.0,
+                "evidence": "Built a React frontend in JS",
+                "source": "experience",
+            },
+            {
+                "name": "Rust",
+                "years": None,
+                "evidence": "Hobby projects in Rust",
+                "source": "project",
+            },
         ],
         "total_years_experience": 4.0,
         "seniority": "mid",
@@ -82,18 +99,45 @@ class TestEmptyInput:
     """An empty document is not an LLM problem."""
 
     @pytest.mark.parametrize("raw_text", ["", "   ", "\n\n\t  \n"])
-    def test_empty_text_short_circuits(self, provider, raw_text: str) -> None:
+    def test_empty_text_raises_without_calling_the_provider(
+        self, provider, raw_text: str
+    ) -> None:
         fake = provider(FakeProvider())
 
-        result = extract_profile(raw_text)
+        with pytest.raises(EmptyDocumentError):
+            extract_profile(raw_text)
 
-        # The assertion that matters is the empty call list: a scanned PDF
-        # produces "" from documents.extract_text, and paying for an LLM call
-        # per scanned resume is a real cost at any volume.
+        # The empty call list is half the point: a scanned PDF produces "" from
+        # documents.extract_text, and paying for an LLM call per scanned resume
+        # is a real cost at any volume.
         assert fake.calls == []
-        assert result == ExtractedProfile(
-            skills=[], total_years_experience=None, seniority="unknown", education=[]
-        )
+
+    def test_empty_document_error_is_permanent(self) -> None:
+        """Retrying will not put a text layer into a scanned PDF.
+
+        Subclassing LLMPermanentError rather than raising it directly means
+        existing handlers need no change, while the type still names the real
+        cause instead of implicating the provider.
+        """
+        assert issubclass(EmptyDocumentError, LLMPermanentError)
+
+    def test_raising_is_what_keeps_extraction_ok_meaningful(self, provider) -> None:
+        """The reason this raises instead of returning an empty profile.
+
+        Returning ExtractedProfile(skills=[], ...) meant the caller persisted
+        a populated-looking blob for a document the model never saw, and
+        `extraction_ok` -- whose whole job is separating "found no skills"
+        from "never ran" -- reported true for the second case. Raising leaves
+        `extracted` null, so the flag stays honest.
+        """
+        provider(FakeProvider())
+        profile = Profile(original_filename="scan.pdf", raw_text="")
+
+        with pytest.raises(EmptyDocumentError):
+            profile.extracted = extract_profile(profile.raw_text).model_dump()
+
+        assert profile.extracted is None
+        assert profile.extraction_ok is False
 
 
 class TestPromptConstruction:
@@ -227,34 +271,53 @@ class TestProviderErrorsPropagate:
             extract_profile("resume text")
 
 
-class TestSkillNormalization:
-    def test_skill_names_are_canonicalized(self, provider) -> None:
+class TestRawOutputIsPreserved:
+    """extract_profile returns what the model said, uncanonicalized.
+
+    Normalization moved to read time (models.Profile.skills). The earlier
+    design canonicalized here, so the original spellings never reached
+    storage -- which made every future addition to the alias map a full LLM
+    re-run, because the raw names it would need to re-map were gone.
+    """
+
+    def test_skill_names_are_not_canonicalized(self, provider) -> None:
         provider(FakeProvider())
 
         result = extract_profile("resume text")
 
-        assert [skill.name for skill in result.skills] == ["JavaScript", "Rust"]
+        assert [skill.name for skill in result.skills] == ["JS", "Rust"]
 
-    def test_evidence_and_years_survive_normalization(self, provider) -> None:
-        """Only the name changes. Evidence is what makes output auditable.
-
-        model_copy(update=...) rather than constructing a new SkillItem is
-        what preserves the rest of the fields; this test is what would catch
-        a rewrite that dropped them.
-        """
+    def test_evidence_and_years_are_untouched(self, provider) -> None:
+        """Evidence is what makes the output auditable -- it quotes verbatim."""
         provider(FakeProvider())
 
-        javascript = extract_profile("resume text").skills[0]
+        js = extract_profile("resume text").skills[0]
 
-        assert javascript.years == 4.0
-        assert javascript.evidence == "Built a React frontend in JS"
+        assert js.years == 4.0
+        assert js.evidence == "Built a React frontend in JS"
 
-    def test_duplicate_skills_collapse_keeping_the_first(self, provider) -> None:
+    def test_duplicates_are_not_collapsed_before_storage(self, provider) -> None:
+        """Both spellings survive, so a later alias change can still see them.
+
+        Collapsing here discarded the losing entry's evidence span
+        permanently. Collapsing on read keeps both in the column and picks a
+        winner per query, which is recoverable.
+        """
         response = json.dumps(
             {
                 "skills": [
-                    {"name": "JS", "years": 5.0, "evidence": "five years of JS"},
-                    {"name": "JavaScript", "years": 1.0, "evidence": "one year"},
+                    {
+                        "name": "JS",
+                        "years": 5.0,
+                        "evidence": "five years of JS",
+                        "source": "experience",
+                    },
+                    {
+                        "name": "JavaScript",
+                        "years": 1.0,
+                        "evidence": "one year",
+                        "source": "skills_list",
+                    },
                 ],
                 "total_years_experience": 5.0,
                 "seniority": "senior",
@@ -265,56 +328,198 @@ class TestSkillNormalization:
 
         skills = extract_profile("resume text").skills
 
-        assert len(skills) == 1
-        assert skills[0].name == "JavaScript"
-        assert skills[0].years == 5.0
+        assert [s.name for s in skills] == ["JS", "JavaScript"]
 
-    def test_blank_skill_names_are_dropped(self, provider) -> None:
-        response = json.dumps(
-            {
-                "skills": [
-                    {"name": "   ", "years": None, "evidence": None},
-                    {"name": "Go", "years": None, "evidence": "wrote a service in Go"},
-                ],
-                "total_years_experience": None,
-                "seniority": "unknown",
-                "education": [],
-            }
-        )
-        provider(FakeProvider(response=response))
+    def test_raw_names_are_what_gets_persisted(self, provider) -> None:
+        """The inverse of the assertion this test used to make.
 
-        assert [s.name for s in extract_profile("resume text").skills] == ["Go"]
-
-    def test_normalization_is_what_gets_persisted(self, provider) -> None:
-        """Documents actual behaviour, which differs from the code comment.
-
-        _normalize's docstring says `extracted` in JSONB "preserves what the
-        LLM actually said, while the normalized form is what scoring uses".
-        There is only one object: routers/profiles.py dumps the return value
-        of extract_profile, so the canonical names are what reach the column
-        and the original spelling is not stored anywhere.
-
-        That may well be the right trade -- evidence spans still quote the
-        resume verbatim, so the output stays auditable. But the comment
-        describes a two-form design that does not exist, and this test pins
-        which of the two is real.
+        routers/profiles.py dumps this value straight into profiles.extracted,
+        so what the model actually wrote is what lands in the column.
         """
         provider(FakeProvider())
 
         dumped = extract_profile("resume text").model_dump(mode="json")
 
-        assert dumped["skills"][0]["name"] == "JavaScript"
-        assert "JS" not in [skill["name"] for skill in dumped["skills"]]
+        assert dumped["skills"][0]["name"] == "JS"
+
+    def test_stored_blob_reads_back_canonicalized(self, provider) -> None:
+        """The round trip that makes storing raw safe.
+
+        Raw goes into the column; the caller still sees canonical names,
+        because Profile.skills normalizes on the way out. This is the test
+        that would catch someone reinstating normalization on the write side
+        and quietly making alias fixes expensive again.
+        """
+        provider(FakeProvider())
+        profile = Profile(original_filename="r.pdf", raw_text="resume text")
+
+        profile.extracted = extract_profile(profile.raw_text).model_dump(mode="json")
+
+        assert profile.extracted["skills"][0]["name"] == "JS"
+        assert [skill["name"] for skill in profile.skills] == ["JavaScript", "Rust"]
+
+
+class TestExtractionVersioning:
+    def test_a_fresh_profile_has_no_version(self) -> None:
+        profile = Profile(original_filename="r.pdf", raw_text="text")
+
+        assert profile.extraction_version is None
+        assert profile.extraction_is_current is False
+
+    def test_current_version_counts_as_current(self) -> None:
+        profile = Profile(original_filename="r.pdf", raw_text="text")
+        profile.extracted = {"skills": []}
+        profile.extraction_version = CURRENT_EXTRACTION_VERSION
+
+        assert profile.extraction_is_current is True
+
+    def test_older_version_is_stale_despite_having_an_extraction(self) -> None:
+        """The case the column exists for.
+
+        A content hash cannot see a prompt change, so this profile looks
+        complete by every other measure. Only the version says it was built
+        by rules that have since been replaced.
+        """
+        profile = Profile(original_filename="r.pdf", raw_text="text")
+        profile.extracted = {"skills": []}
+        profile.extraction_version = CURRENT_EXTRACTION_VERSION - 1
+
+        assert profile.extraction_ok is True
+        assert profile.extraction_is_current is False
+
+
+class TestSkillSource:
+    """Separating demonstrated skills from claimed ones.
+
+    "Go" in a technologies list is a claim; shipping a service in Go is
+    evidence. Weighting them identically is what a resume keyword-stuffer is
+    counting on, and telling them apart is most of what a human reviewer
+    does. M7 needs the distinction as data.
+    """
+
+    def test_source_survives_extraction(self, provider) -> None:
+        provider(FakeProvider())
+
+        skills = extract_profile("resume text").skills
+
+        assert [skill.source for skill in skills] == ["experience", "project"]
+
+    def test_source_survives_the_storage_round_trip(self, provider) -> None:
+        """It has to reach the column and come back, or M7 cannot weight it.
+
+        normalize_skill_items rewrites `name` and passes everything else
+        through; this is what would catch a rewrite that rebuilt the dict
+        from known keys and silently dropped this one.
+        """
+        provider(FakeProvider())
+        profile = Profile(original_filename="r.pdf", raw_text="resume text")
+
+        profile.extracted = extract_profile(profile.raw_text).model_dump(mode="json")
+
+        assert [skill["source"] for skill in profile.skills] == [
+            "experience",
+            "project",
+        ]
+
+    def test_stronger_source_wins_when_a_skill_appears_twice(self, provider) -> None:
+        """Dedupe keeps the first occurrence, and the prompt orders by strength.
+
+        A skill listed in both a job bullet and a technologies section must
+        not read as `skills_list` -- that would discount the very evidence
+        that makes it credible. The prompt asks for the strongest placement;
+        this pins that read-time dedupe doesn't then undo it.
+        """
+        provider(FakeProvider())
+        profile = Profile(original_filename="r.pdf", raw_text="resume text")
+
+        # "JS" (experience) and "JavaScript" (skills_list) collapse to one.
+        profile.extracted = {
+            "skills": [
+                {"name": "JS", "years": 5.0, "evidence": "shipped it", "source": "experience"},
+                {"name": "JavaScript", "years": None, "evidence": None, "source": "skills_list"},
+            ]
+        }
+
+        assert [(s["name"], s["source"]) for s in profile.skills] == [
+            ("JavaScript", "experience")
+        ]
+
+    def test_pre_v3_profiles_read_back_without_a_source(self) -> None:
+        """Profiles extracted before version 3 have no `source` key at all.
+
+        The API schema makes the field optional for exactly this reason. A
+        required field would turn every older profile into a 500 on read
+        rather than a row that simply predates the data.
+        """
+        profile = Profile(original_filename="r.pdf", raw_text="text")
+        profile.extracted = {"skills": [{"name": "js", "years": None, "evidence": None}]}
+
+        skill = profile.skills[0]
+
+        assert skill["name"] == "JavaScript"
+        assert skill.get("source") is None
+
+
+class TestPromptRules:
+    def test_source_instruction_gives_a_precedence_order(self) -> None:
+        """The rule that matters most, because most skills appear twice.
+
+        A technologies section normally repeats what the bullets already
+        demonstrated. Without an explicit precedence the model picks
+        arbitrarily, and roughly half the corpus lands in the weakest bucket
+        despite having real evidence behind it.
+        """
+        instructions = extract_module.SYSTEM_INSTRUCTIONS
+
+        assert "experience > project > education > skills_list" in instructions
+        assert 'Never answer "skills_list" for a skill that also appears' in instructions
+
+    def test_years_instruction_asks_for_inference_from_dates(self) -> None:
+        """Version 1 returned null for `years` on every skill measured.
+
+        The instruction to leave it null unless the resume "supports a number"
+        was read as "unless it states one outright". Version 2 asks for the
+        inference explicitly, because the partial-match bucket at M7 -- has
+        the skill, insufficient years -- is defined entirely by this field and
+        collapses to a two-way breakdown without it.
+        """
+        assert "Infer it from the date range" in extract_module.SYSTEM_INSTRUCTIONS
 
 
 class TestExtractionSchema:
     """The model is the LLM contract; these are the parts it must enforce."""
 
     def test_optional_skill_fields_default_to_none(self) -> None:
-        skill = SkillItem(name="Go")
+        skill = SkillItem(name="Go", source="skills_list")
 
         assert skill.years is None
         assert skill.evidence is None
+
+    def test_source_is_required(self) -> None:
+        """No default, on purpose.
+
+        A Pydantic default drops the field from the schema's `required` list,
+        and the model then treats it as optional -- which is precisely how
+        version 1 produced `years: null` on 29 of 29 skills. "unknown" is the
+        escape hatch instead, so the model must still make a call.
+        """
+        with pytest.raises(ValidationError):
+            SkillItem(name="Go")
+
+    def test_source_is_constrained(self) -> None:
+        with pytest.raises(ValidationError):
+            SkillItem(name="Go", source="linkedin_endorsement")
+
+    def test_source_is_required_in_the_json_schema(self) -> None:
+        """What the model is actually constrained by.
+
+        Asserting on the Pydantic class alone would pass even if the field
+        never reached the schema sent to the provider, which is the only
+        place the constraint has any effect on extraction.
+        """
+        schema = ExtractedProfile.model_json_schema()
+
+        assert "source" in schema["$defs"]["SkillItem"]["required"]
 
     def test_seniority_is_constrained(self) -> None:
         with pytest.raises(ValueError):

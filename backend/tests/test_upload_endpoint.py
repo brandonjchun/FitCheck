@@ -12,7 +12,7 @@ here points at wiring; a failure there points at the middleware itself.
 """
 
 import pytest
-from conftest import make_docx, make_pdf
+from conftest import make_docx, make_pdf, make_scanned_pdf
 from fastapi.testclient import TestClient
 
 from app.main import app
@@ -152,3 +152,57 @@ class TestDocumentErrorsBecome400:
         )
 
         assert response.status_code == 400
+
+
+class TestEmptyDocumentRejected:
+    """A file can parse cleanly and still contain nothing usable.
+
+    422 rather than 400: the request was well-formed and the file really was
+    a valid PDF. Only the content is unusable, which is a different failure
+    from a corrupt upload.
+    """
+
+    def test_scanned_pdf_returns_422(self, client: TestClient) -> None:
+        """The common case -- resumes exported from phone scanner apps.
+
+        pdfplumber returns "" for a PDF that is images all the way down, with
+        no error. Before this check the upload succeeded and produced a
+        profile with zero skills, no error, and nothing to distinguish it
+        from a resume the model genuinely found nothing in.
+        """
+        response = client.post(
+            UPLOAD_URL,
+            files={"file": ("scan.pdf", make_scanned_pdf(), "application/pdf")},
+        )
+
+        assert response.status_code == 422
+
+    def test_rejection_explains_what_to_do(self, client: TestClient) -> None:
+        """"Unprocessable entity" alone leaves the user with no next step.
+
+        They uploaded a file that looks fine to them; the message has to name
+        the actual problem and a way out.
+        """
+        response = client.post(
+            UPLOAD_URL,
+            files={"file": ("scan.pdf", make_scanned_pdf(), "application/pdf")},
+        )
+
+        detail = response.json()["detail"]
+        assert "no text layer" in detail
+        assert "DOCX" in detail
+
+    def test_whitespace_only_docx_returns_422(self, client: TestClient) -> None:
+        """Not just scans: an empty DOCX reaches the same dead end."""
+        response = client.post(
+            UPLOAD_URL,
+            files={
+                "file": (
+                    "empty.docx",
+                    make_docx(["   ", "\t"]),
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )
+            },
+        )
+
+        assert response.status_code == 422

@@ -8,7 +8,12 @@ token, overlap scoring silently reports a miss on a skill the candidate has.
 
 import pytest
 
-from app.skills import SKILL_ALIASES, normalize_skill, normalize_skills
+from app.skills import (
+    SKILL_ALIASES,
+    normalize_skill,
+    normalize_skill_items,
+    normalize_skills,
+)
 
 
 class TestNormalizeSkill:
@@ -102,6 +107,96 @@ class TestNormalizeSkills:
 
     def test_empty_list(self) -> None:
         assert normalize_skills([]) == []
+
+
+class TestNormalizeSkillItems:
+    """The dict-shaped form, applied when reading the extraction blob back.
+
+    This is where canonicalization happens now. Doing it on read rather than
+    before the write is what makes an addition to the alias map retroactive:
+    every stored profile picks it up on the next request, with no backfill
+    and no second LLM call.
+    """
+
+    def test_canonicalizes_names(self) -> None:
+        items = [{"name": "JS", "years": 4.0, "evidence": "built a frontend in JS"}]
+
+        assert normalize_skill_items(items)[0]["name"] == "JavaScript"
+
+    def test_years_and_evidence_pass_through_untouched(self) -> None:
+        """Only `name` is rewritten.
+
+        Evidence quotes the resume verbatim -- that is the property making
+        the extraction auditable, and rewriting it would destroy the ability
+        to locate the phrase in the source document.
+        """
+        items = [{"name": "js", "years": 4.0, "evidence": "Built a React frontend"}]
+
+        assert normalize_skill_items(items)[0] == {
+            "name": "JavaScript",
+            "years": 4.0,
+            "evidence": "Built a React frontend",
+        }
+
+    def test_duplicates_collapse_to_the_first_occurrence(self) -> None:
+        """Order matters, and the first mention is generally better evidenced.
+
+        An LLM lists prominent skills first, so given "JS" with five years and
+        "JavaScript" with one, the five-year entry is the one to keep.
+        """
+        items = [
+            {"name": "JS", "years": 5.0, "evidence": "five years of JS"},
+            {"name": "JavaScript", "years": 1.0, "evidence": "one year"},
+        ]
+
+        result = normalize_skill_items(items)
+
+        assert len(result) == 1
+        assert result[0]["years"] == 5.0
+        assert result[0]["evidence"] == "five years of JS"
+
+    def test_drops_blank_names(self) -> None:
+        items = [
+            {"name": "   ", "years": None, "evidence": None},
+            {"name": "Go", "years": None, "evidence": "wrote a service in Go"},
+        ]
+
+        assert [item["name"] for item in normalize_skill_items(items)] == ["Go"]
+
+    def test_tolerates_a_missing_name_key(self) -> None:
+        """Defensive: the blob is whatever the model produced last time.
+
+        A stored extraction predating a schema change may not have the shape
+        the current code expects, and a KeyError on read would take down the
+        profile endpoint for a row that is merely old.
+        """
+        assert normalize_skill_items([{"years": 2.0}]) == []
+
+    def test_extra_keys_survive(self) -> None:
+        """Forward compatibility with fields added to SkillItem later.
+
+        `source` is a candidate for the next schema version; a normalizer
+        that silently dropped unrecognised keys would erase it on read.
+        """
+        items = [{"name": "go", "years": None, "evidence": None, "source": "project"}]
+
+        assert normalize_skill_items(items)[0]["source"] == "project"
+
+    def test_does_not_mutate_its_input(self) -> None:
+        """The caller's list is the ORM's JSONB value.
+
+        Rewriting names in place would mark the attribute dirty and could
+        write canonicalized names back to the column on the next flush --
+        reintroducing exactly the lossy write this design removed.
+        """
+        items = [{"name": "js", "years": None, "evidence": None}]
+
+        normalize_skill_items(items)
+
+        assert items[0]["name"] == "js"
+
+    def test_empty_list(self) -> None:
+        assert normalize_skill_items([]) == []
 
 
 class TestAliasMapIntegrity:
