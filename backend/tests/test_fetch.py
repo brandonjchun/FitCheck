@@ -335,6 +335,45 @@ class TestContentGuards:
             POSTING_URL, limiter=AllowAllLimiter()
         )
 
+    def test_unknown_charset_is_decoded_rather_than_raising(self, serve, robots) -> None:
+        """A declared charset no codec implements must not escape classification.
+
+        `errors="replace"` handles bad bytes and does nothing here: decode
+        raises LookupError before reading any byte. LookupError is neither
+        TransientFetchError nor PermanentFetchError, so it used to travel
+        straight past this module into the worker's `except Exception`, which
+        re-raises -- so RQ spent three attempts and two minutes re-learning
+        that the charset is still not a codec. The posting is recoverable, so
+        the fallback reads it rather than failing at all.
+        """
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf8mb4"},
+                content=b"<html><body>Senior Engineer</body></html>",
+            )
+
+        serve(handler)
+
+        assert "Senior Engineer" in fetch_posting_text(
+            POSTING_URL, limiter=AllowAllLimiter()
+        )
+
+    def test_undecodable_bytes_still_yield_text(self, serve, robots) -> None:
+        """The case `errors="replace"` does cover, kept distinct from the one above."""
+
+        def handler(request):
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html; charset=utf-8"},
+                content=b"<html><body>Caf\xff Engineer</body></html>",
+            )
+
+        serve(handler)
+
+        assert "Engineer" in fetch_posting_text(POSTING_URL, limiter=AllowAllLimiter())
+
 
 class TestSSRFGuard:
     """The guard as the fetch path actually uses it.

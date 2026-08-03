@@ -34,6 +34,26 @@ class LLMTransientError(LLMError):
     """
 
 
+class LLMQuotaError(LLMTransientError):
+    """The provider refused because an account limit is exhausted.
+
+    Transient by inheritance, and genuinely so -- a quota is a clock, not a
+    verdict, and the same request succeeds once it resets. Distinguished from
+    its parent because it is the one transient failure where retrying the
+    *same provider* is pointless for a known duration, which is what lets a
+    caller route around it instead of backing off into it.
+
+    `retry_after_seconds` carries the provider's own estimate when it gives
+    one. Honouring it matters in both directions: Gemini answering "retry in
+    50s" against a fixed four-hour cooldown would abandon the better model
+    for most of a day over a per-minute limit.
+    """
+
+    def __init__(self, message: str, retry_after_seconds: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
 class LLMPermanentError(LLMError):
     """Never worth retrying: bad API key, unknown model, malformed request.
 

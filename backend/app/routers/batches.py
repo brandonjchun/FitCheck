@@ -1,22 +1,38 @@
-﻿"""Path A-bulk: upload a .txt of job-posting URLs, poll one progress endpoint.
+﻿"""Path A-bulk: submit many job-posting URLs, poll one progress endpoint.
 
 The distinction from Path A is not size, it is latency class. One submitted
-URL means a human is watching a spinner; a 500-URL list means they uploaded
+URL means a human is watching a spinner; a 500-URL list means they submitted
 it and walked away. Routing the second onto the interactive queue would put
 every single-URL submission behind it, which is the head-of-line blocking the
 four-queue split exists to prevent -- so everything here lands on `ingest`.
+
+**Two input shapes, one path.** A `.txt` upload and a pasted textarea both
+arrive here, because they differ only in how the bytes reached the handler.
+The file was the original shape and presumes a list that already exists as a
+file, which is not how anyone accumulates job postings -- the realistic case
+is five to twenty URLs copied out of open tabs. Everything expensive (the
+cap, the ownership check, the dedupe, the fan-out) is shared; the two
+branches are four lines of decoding.
 """
 
 import logging
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from rq import Retry
 from sqlalchemy import func, select
+from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db import get_db
-from app.models import IngestJob, Profile, UrlBatch, User, hash_url
+from app.models import (
+    IngestJob,
+    Profile,
+    UrlBatch,
+    User,
+    dedupe_key_for_submission,
+    hash_url,
+)
 from app.queues import (
     FAILURE_TTL,
     JOB_TIMEOUT,
@@ -38,27 +54,54 @@ router = APIRouter(prefix="/api/batches", tags=["batches"])
 # its jobs are in one of these.
 _IN_FLIGHT = ("queued", "running")
 
+# What goes in `original_filename` when there was no file.
+#
+# Deliberately shaped so it cannot be mistaken for a real filename -- no file
+# is named `(pasted)` -- because the column is NOT NULL and something has to
+# occupy it. The honest schema is a nullable `original_filename` plus a
+# `source` discriminator, and that is a migration: not taken here because the
+# alembic head is currently mid-M7 and chaining a small UI feature onto
+# unfinished work is how it stops being shippable on its own. Recorded rather
+# than hidden; see the note in PROJECTLIMITATIONS.md.
+_PASTED_LABEL = "(pasted)"
+
 
 @router.post("", response_model=BatchCreateResponse, status_code=202)
 def create_batch(
     profile_id: int,
-    file: UploadFile = File(...),
+    file: UploadFile | None = File(None),
+    # Aliased because `urls` is taken further down by the *parsed* list. Two
+    # meanings for one name inside one function is how the wrong one gets
+    # read; the wire name stays `urls`, which is what a client should send.
+    urls_text: str | None = Form(None, alias="urls"),
     user: User = Depends(current_user),
     db: Session = Depends(get_db),
 ) -> BatchCreateResponse:
-    """Accept a URL list and fan it out onto the ingest queue.
+    """Accept a URL list -- as a file or as pasted text -- and fan it out.
 
     202, not 201: nothing has been fetched. The batch row exists and N jobs
     are queued, which is exactly what "accepted for processing" means.
 
     Parsing happens in the handler rather than in a job. It is line splitting
-    and string normalization over an already-uploaded file -- microseconds,
+    and string normalization over text already in memory -- microseconds,
     local CPU, no network -- so pushing it onto a queue would add a round
     trip and a second polling state to save nothing. The expensive part is
     the N fetches, and those are queued.
     """
-    if file.filename is None:
+    # Exactly one source. Rejecting *both* matters as much as rejecting
+    # neither: there is no defensible rule for which one wins, and silently
+    # picking one means a user who attached the wrong file gets a batch they
+    # did not ask for and cannot tell apart from the one they wanted.
+    if (file is None) == (urls_text is None):
+        raise HTTPException(
+            status_code=400,
+            detail="Send either a .txt file or a pasted list of URLs, not both.",
+        )
+
+    if file is not None and file.filename is None:
         raise HTTPException(status_code=400, detail="No filename provided")
+
+    source_label = file.filename if file is not None else _PASTED_LABEL
 
     # Ownership before anything else. Without this predicate the endpoint
     # accepts a profile id belonging to someone else and turns one authenticated
@@ -87,32 +130,38 @@ def create_batch(
             ),
         )
 
-    raw = file.file.read()
-    try:
-        # utf-8-sig, not utf-8: strips a leading byte order mark if one is
-        # there and behaves identically if it is not.
-        #
-        # Notepad and PowerShell's `-Encoding utf8` both prepend EF BB BF to a
-        # file they save. Plain utf-8 decodes that faithfully into a U+FEFF
-        # character glued to the front of line one, so the first URL no longer
-        # starts with "http" and is counted as unreadable -- while looking
-        # perfectly correct to anyone who opens the file, because the
-        # character is invisible.
-        #
-        # Worse than losing a row: it corrupts the accounting this endpoint
-        # exists to provide. With line one discarded, a later repeat of that
-        # same URL becomes its first occurrence and is accepted rather than
-        # counted as a duplicate, so `rejected` and `duplicates` are both
-        # wrong rather than merely off by one.
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        # A .txt that is not UTF-8 is usually a mis-picked file rather than an
-        # exotic encoding, and guessing at encodings produces URLs with
-        # mojibake in them that fail confusingly three steps later.
-        raise HTTPException(
-            status_code=400,
-            detail="File must be UTF-8 text, one job posting URL per line.",
-        ) from None
+    if file is None:
+        # Already text -- the form parser decoded it. The BOM problem the file
+        # branch guards against cannot arise on this path: a browser posts
+        # form fields as UTF-8 and does not prepend a byte order mark.
+        text = urls_text or ""
+    else:
+        raw = file.file.read()
+        try:
+            # utf-8-sig, not utf-8: strips a leading byte order mark if one is
+            # there and behaves identically if it is not.
+            #
+            # Notepad and PowerShell's `-Encoding utf8` both prepend EF BB BF
+            # to a file they save. Plain utf-8 decodes that faithfully into a
+            # U+FEFF character glued to the front of line one, so the first
+            # URL no longer starts with "http" and is counted as unreadable --
+            # while looking perfectly correct to anyone who opens the file,
+            # because the character is invisible.
+            #
+            # Worse than losing a row: it corrupts the accounting this
+            # endpoint exists to provide. With line one discarded, a later
+            # repeat of that same URL becomes its first occurrence and is
+            # accepted rather than counted as a duplicate, so `rejected` and
+            # `duplicates` are both wrong rather than merely off by one.
+            text = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            # A .txt that is not UTF-8 is usually a mis-picked file rather
+            # than an exotic encoding, and guessing at encodings produces URLs
+            # with mojibake in them that fail confusingly three steps later.
+            raise HTTPException(
+                status_code=400,
+                detail="File must be UTF-8 text, one job posting URL per line.",
+            ) from None
 
     urls, rejected, duplicates = parse_url_list(text, settings.max_urls_per_batch)
 
@@ -128,7 +177,7 @@ def create_batch(
     batch = UrlBatch(
         user_id=user.id,
         profile_id=profile.id,
-        original_filename=file.filename,
+        original_filename=source_label,
         total_urls=len(urls),
         rejected_urls=rejected,
         duplicate_urls=duplicates,
@@ -149,6 +198,8 @@ def create_batch(
 
     rows = [
         {
+            "kind": "ingest_posting",
+            "dedupe_key": dedupe_key_for_submission(profile.id, hash_url(url)),
             "profile_id": profile.id,
             "batch_id": batch.id,
             "url": url,
@@ -160,7 +211,15 @@ def create_batch(
     created = db.execute(
         pg_insert(IngestJob)
         .values(rows)
-        .on_conflict_do_nothing(index_elements=["profile_id", "url_hash"])
+        # Targets the partial unique index, so the predicate has to be
+        # restated -- Postgres matches ON CONFLICT to an index by both its
+        # columns and its WHERE clause, and omitting the predicate raises
+        # "no unique or exclusion constraint matching" rather than silently
+        # picking the wrong index.
+        .on_conflict_do_nothing(
+            index_elements=["kind", "dedupe_key"],
+            index_where=sa_text("status IN ('queued', 'running')"),
+        )
         .returning(IngestJob.id)
     ).scalars().all()
 

@@ -89,7 +89,12 @@ def provider(monkeypatch: pytest.MonkeyPatch):
     """
 
     def install(fake: FakeProvider) -> FakeProvider:
-        monkeypatch.setattr(extract_module, "get_provider", lambda: fake)
+        # Accepts the task argument callers now pass. Ignored here: which
+        # provider serves which task is test_providers.py's question,
+        # and these tests are about the prompt and the validation.
+        monkeypatch.setattr(
+            extract_module, "get_provider", lambda task="profile": fake
+        )
         return fake
 
     return install

@@ -300,6 +300,10 @@ class TestDeleteProfile:
                 url="https://example.com/posting",
                 url_hash=hashlib.sha256(b"https://example.com/posting").hexdigest(),
                 status="queued",
+                dedupe_key=(
+                    f"profile:{profile.id}:"
+                    + hashlib.sha256(b"https://example.com/posting").hexdigest()
+                ),
             )
             db.add(job)
             db.commit()

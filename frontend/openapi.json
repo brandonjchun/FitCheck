@@ -548,7 +548,7 @@
           "batches"
         ],
         "summary": "Create Batch",
-        "description": "Accept a URL list and fan it out onto the ingest queue.\n\n202, not 201: nothing has been fetched. The batch row exists and N jobs\nare queued, which is exactly what \"accepted for processing\" means.\n\nParsing happens in the handler rather than in a job. It is line splitting\nand string normalization over an already-uploaded file -- microseconds,\nlocal CPU, no network -- so pushing it onto a queue would add a round\ntrip and a second polling state to save nothing. The expensive part is\nthe N fetches, and those are queued.",
+        "description": "Accept a URL list -- as a file or as pasted text -- and fan it out.\n\n202, not 201: nothing has been fetched. The batch row exists and N jobs\nare queued, which is exactly what \"accepted for processing\" means.\n\nParsing happens in the handler rather than in a job. It is line splitting\nand string normalization over text already in memory -- microseconds,\nlocal CPU, no network -- so pushing it onto a queue would add a round\ntrip and a second polling state to save nothing. The expensive part is\nthe N fetches, and those are queued.",
         "operationId": "create_batch_api_batches_post",
         "parameters": [
           {
@@ -562,7 +562,6 @@
           }
         ],
         "requestBody": {
-          "required": true,
           "content": {
             "multipart/form-data": {
               "schema": {
@@ -1008,15 +1007,30 @@
       "Body_create_batch_api_batches_post": {
         "properties": {
           "file": {
-            "type": "string",
-            "contentMediaType": "application/octet-stream",
+            "anyOf": [
+              {
+                "type": "string",
+                "contentMediaType": "application/octet-stream"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "File"
+          },
+          "urls": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Urls"
           }
         },
         "type": "object",
-        "required": [
-          "file"
-        ],
         "title": "Body_create_batch_api_batches_post"
       },
       "Body_upload_resume_api_profiles_post": {

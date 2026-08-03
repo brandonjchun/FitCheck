@@ -98,7 +98,8 @@ services:
       redis:
         condition: service_healthy
     env_file:
-      # Picks up LLM_PROVIDER, GEMINI_API_KEY, GEMINI_MODEL, OLLAMA_MODEL.
+      # Picks up LLM_PROVIDER_PROFILE, LLM_PROVIDER_POSTING, GEMINI_API_KEY,
+      # GEMINI_MODEL, OLLAMA_MODEL.
       # Compose only auto-loads a .env at the project root, and this one
       # lives under backend/, so it has to be named explicitly.
       - ./backend/.env

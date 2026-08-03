@@ -356,13 +356,13 @@ export interface paths {
         put?: never;
         /**
          * Create Batch
-         * @description Accept a URL list and fan it out onto the ingest queue.
+         * @description Accept a URL list -- as a file or as pasted text -- and fan it out.
          *
          *     202, not 201: nothing has been fetched. The batch row exists and N jobs
          *     are queued, which is exactly what "accepted for processing" means.
          *
          *     Parsing happens in the handler rather than in a job. It is line splitting
-         *     and string normalization over an already-uploaded file -- microseconds,
+         *     and string normalization over text already in memory -- microseconds,
          *     local CPU, no network -- so pushing it onto a queue would add a round
          *     trip and a second polling state to save nothing. The expensive part is
          *     the N fetches, and those are queued.
@@ -599,7 +599,9 @@ export interface components {
         /** Body_create_batch_api_batches_post */
         Body_create_batch_api_batches_post: {
             /** File */
-            file: string;
+            file?: string | null;
+            /** Urls */
+            urls?: string | null;
         };
         /** Body_upload_resume_api_profiles_post */
         Body_upload_resume_api_profiles_post: {
@@ -1462,7 +1464,7 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "multipart/form-data": components["schemas"]["Body_create_batch_api_batches_post"];
             };

@@ -108,6 +108,18 @@ def upload(client, profile_id, lines, filename="urls.txt"):
     )
 
 
+def paste(client, profile_id, lines):
+    """The same submission as `upload`, arriving as a form field instead.
+
+    Deliberately posted as multipart rather than JSON: the endpoint takes a
+    file on the same route, so the body has to be form-encoded either way.
+    """
+    return client.post(
+        f"{BATCH_URL}?profile_id={profile_id}",
+        data={"urls": "\n".join(lines)},
+    )
+
+
 class TestCreateBatch:
     def test_returns_202_with_per_line_accounting(self, client, queues, profile_id):
         """202, because nothing has been fetched -- only accepted."""
@@ -274,6 +286,116 @@ class TestCreateBatch:
             assert job.rq_job_id is None
         finally:
             db.close()
+
+
+class TestPastedList:
+    """The paste path exists because requiring a .txt presumes a list that
+    already exists as a file, which is not how anyone collects postings.
+
+    What these assert is mostly *sameness*: a pasted list is the file path
+    with four lines of decoding swapped out, so the accounting, the fan-out,
+    and the authorization must be indistinguishable. A second entry point
+    that quietly enforces less is the reason to test it at all.
+    """
+
+    def test_accepted_with_the_same_per_line_accounting(
+        self, client, queues, profile_id
+    ):
+        response = paste(
+            client,
+            profile_id,
+            [
+                "https://e.com/j/1",
+                "https://e.com/j/2?utm_source=news",  # normalizes to /j/2
+                "https://e.com/j/2",                 # duplicate of the above
+                "not a url",                         # rejected
+                "",                                  # blank, not counted
+            ],
+        )
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["accepted"] == 2
+        assert body["duplicates"] == 1
+        assert body["rejected"] == 1
+
+    def test_fans_out_to_the_ingest_queue(self, client, queues, profile_id):
+        """Same queue as the file path. Pasting is not a latency class."""
+        paste(client, profile_id, [f"https://e.com/j/{i}" for i in range(5)])
+
+        assert len(queues[QUEUE_INGEST].calls) == 5
+        assert QUEUE_INTERACTIVE not in queues
+
+    def test_records_that_there_was_no_file(self, client, queues, profile_id):
+        """`original_filename` is NOT NULL, so something occupies it. It has
+        to be something no real file could be called -- a plausible-looking
+        name here would make a pasted batch indistinguishable from an
+        uploaded one in the list view."""
+        body = paste(client, profile_id, ["https://e.com/j/1"]).json()
+
+        assert body["filename"] == "(pasted)"
+
+    def test_no_usable_urls_is_422(self, client, queues, profile_id):
+        response = paste(client, profile_id, ["not a url", "also not a url"])
+
+        assert response.status_code == 422
+        assert queues == {}
+
+    def test_sending_both_a_file_and_a_paste_is_400(
+        self, client, queues, profile_id
+    ):
+        """There is no defensible rule for which wins. Silently picking one
+        means a user who attached the wrong file gets a batch they did not
+        ask for and cannot tell apart from the one they wanted."""
+        response = client.post(
+            f"{BATCH_URL}?profile_id={profile_id}",
+            files={"file": ("urls.txt", b"https://e.com/j/1", "text/plain")},
+            data={"urls": "https://e.com/j/2"},
+        )
+
+        assert response.status_code == 400
+        assert queues == {}
+
+    def test_sending_neither_is_400(self, client, queues, profile_id):
+        response = client.post(f"{BATCH_URL}?profile_id={profile_id}", data={})
+
+        assert response.status_code == 400
+        assert queues == {}
+
+    def test_cannot_paste_against_someone_elses_profile(
+        self, client, queues, make_user
+    ):
+        """The request-amplifier check, restated for the new entry point. An
+        authorization rule that holds on one of two paths into the same
+        fan-out is not an authorization rule."""
+        stranger = make_user()
+        db = SessionLocal()
+        try:
+            victim = Profile(
+                user_id=stranger.id, original_filename="v.pdf", raw_text="text"
+            )
+            db.add(victim)
+            db.commit()
+            db.refresh(victim)
+            victim_id = victim.id
+        finally:
+            db.close()
+
+        response = paste(client, victim_id, ["https://e.com/j/1"])
+
+        assert response.status_code == 404
+        assert queues == {}
+
+    def test_unauthenticated_paste_is_401(self, profile_id):
+        app.dependency_overrides.clear()
+        anonymous = TestClient(app, raise_server_exceptions=False)
+
+        response = anonymous.post(
+            f"{BATCH_URL}?profile_id={profile_id}",
+            data={"urls": "https://e.com/j/1"},
+        )
+
+        assert response.status_code == 401
 
 
 class TestBatchLimits:

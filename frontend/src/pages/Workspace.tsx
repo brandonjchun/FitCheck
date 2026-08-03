@@ -477,6 +477,7 @@ function BatchRow({ batch }: { batch: Batch }) {
 
 function BatchPanel({ profileId }: { profileId: number }) {
   const queryClient = useQueryClient();
+  const [pasted, setPasted] = useState("");
 
   const batches = useQuery({
     queryKey: ["batches"],
@@ -484,20 +485,72 @@ function BatchPanel({ profileId }: { profileId: number }) {
   });
 
   const upload = useMutation({
-    mutationFn: (file: File) => batchApi.create(profileId, file),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["batches"] }),
+    mutationFn: (source: File | string) => batchApi.create(profileId, source),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["batches"] });
+      setPasted("");
+    },
   });
+
+  /* Counts non-blank lines, which is what the server will parse -- not
+   * `split("\n").length`, which reports 1 for an empty box and counts the
+   * trailing newline every textarea ends with. The number shown has to be the
+   * number acted on, or the cap warning fires a line early. */
+  const lineCount = pasted.split("\n").filter((line) => line.trim()).length;
+  const overCap = lineCount > MAX_URLS_PER_BATCH;
 
   return (
     <div className="panel card">
       <div className="panel-head">
         <div>
-          <h3>Bulk upload</h3>
+          <h3>Bulk submit</h3>
           <p className="panel-meta">
-            A .txt file, one posting URL per line, up to {MAX_URLS_PER_BATCH}.
+            One posting URL per line, up to {MAX_URLS_PER_BATCH}. Paste them or
+            upload a .txt.
           </p>
         </div>
       </div>
+
+      {/* Paste is the primary path. Requiring a .txt presumes a list that
+        * already exists as a file, which is not how anyone collects postings --
+        * the real case is a handful of URLs out of open tabs. */}
+      <form
+        className="batch-paste"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (pasted.trim() && !overCap) upload.mutate(pasted);
+        }}
+      >
+        <label htmlFor="batch-paste" className="sr-only">
+          Job posting URLs, one per line
+        </label>
+        <textarea
+          id="batch-paste"
+          className="batch-textarea"
+          rows={5}
+          spellCheck={false}
+          placeholder={"https://boards.greenhouse.io/…\nhttps://jobs.lever.co/…"}
+          value={pasted}
+          disabled={upload.isPending}
+          onChange={(e) => setPasted(e.target.value)}
+        />
+        <div className="batch-paste-foot">
+          <span className={`batch-hint ${overCap ? "is-over" : ""}`}>
+            {lineCount === 0
+              ? "One URL per line."
+              : `${lineCount} line${lineCount === 1 ? "" : "s"}${
+                  overCap ? ` — over the ${MAX_URLS_PER_BATCH} limit` : ""
+                }`}
+          </span>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={upload.isPending || !pasted.trim() || overCap}
+          >
+            {upload.isPending ? "Submitting…" : "Submit URLs"}
+          </button>
+        </div>
+      </form>
 
       <div className="batch-upload">
         <input
@@ -514,7 +567,7 @@ function BatchPanel({ profileId }: { profileId: number }) {
           }}
         />
         <label htmlFor="batch-input" className="btn btn-ghost">
-          {upload.isPending ? "Uploading…" : "Choose a URL list"}
+          {upload.isPending ? "Uploading…" : "…or upload a .txt"}
         </label>
         <span className="batch-hint">
           Bulk lists land on the <code>ingest</code> queue, so they never delay a
@@ -546,8 +599,8 @@ function BatchPanel({ profileId }: { profileId: number }) {
         </ul>
       ) : (
         <p className="panel-empty">
-          No lists uploaded yet. Useful when you have a page of postings to
-          check at once rather than one you are looking at right now.
+          Nothing submitted in bulk yet. Useful when you have a few postings
+          open at once rather than one you are looking at right now.
         </p>
       )}
     </div>

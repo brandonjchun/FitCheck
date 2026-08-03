@@ -140,17 +140,60 @@ class TestGetProvider:
         """
         from app.config import settings
 
-        monkeypatch.setattr(settings, "llm_provider", "anthropic", raising=False)
+        monkeypatch.setattr(
+            settings, "llm_provider_profile", "anthropic", raising=False
+        )
         get_provider.cache_clear()
 
         with pytest.raises(LLMPermanentError, match="anthropic"):
-            get_provider()
+            get_provider("profile")
 
         get_provider.cache_clear()
 
-    def test_provider_is_cached(self) -> None:
-        # Construction builds an SDK client; one per process is correct.
-        assert get_provider.cache_info().maxsize == 1
+    def test_provider_is_cached_per_task(self) -> None:
+        """One instance per task per process, not one overall.
+
+        Two entries rather than one, because profile and posting are routed
+        to different providers -- a single-entry cache would hand whichever
+        task ran second the other one's client.
+        """
+        assert get_provider.cache_info().maxsize == 2
+
+    def test_tasks_route_independently(self, monkeypatch) -> None:
+        """The whole point of the split.
+
+        Postings run local in bulk because the Gemini free tier is 20
+        requests a day; resumes stay on Gemini because local loses
+        years-inference and seniority. If these ever resolve to the same
+        provider by accident, one of those two facts is being ignored.
+        """
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "llm_provider_profile", "gemini", raising=False)
+        monkeypatch.setattr(settings, "llm_provider_posting", "ollama", raising=False)
+        get_provider.cache_clear()
+
+        assert get_provider("profile").name == "gemini"
+        assert get_provider("posting").name == "ollama"
+
+        get_provider.cache_clear()
+
+    def test_an_unnamed_task_gets_the_higher_quality_path(self, monkeypatch) -> None:
+        """Defaulting to the profile provider is deliberate.
+
+        A caller that forgets to name its task then fails on quota -- loud --
+        rather than quietly extracting at lower quality, which nothing
+        downstream can detect.
+        """
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "llm_provider_profile", "gemini", raising=False)
+        monkeypatch.setattr(settings, "llm_provider_posting", "ollama", raising=False)
+        get_provider.cache_clear()
+
+        assert get_provider().name == get_provider("profile").name
+
+        get_provider.cache_clear()
 
 
 class TestProtocolConformance:

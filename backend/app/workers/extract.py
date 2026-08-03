@@ -1,8 +1,11 @@
 """Turn raw text into validated structured data -- resumes and job postings.
 
 Provider-agnostic: the prompts, the validation, and the error classification
-live here once, and get_provider() decides which LLM actually runs. Swapping
-Gemini for Ollama changes a line in .env and nothing in this file.
+live here once, and get_provider(task) decides which LLM actually runs. Each
+extraction names the job it is doing rather than the model it wants, so the
+two can be routed to different providers -- which they are, because postings
+run local in bulk while resumes stay on Gemini for quality. Changing either
+is a line in .env and nothing in this file.
 
 Both extractions share everything except the prompt and the schema, which is
 the argument for one module. What they deliberately do *not* share is the
@@ -122,7 +125,7 @@ def extract_profile(raw_text: str) -> ExtractedProfile:
             MAX_RESUME_CHARS,
         )
 
-    provider = get_provider()
+    provider = get_provider("profile")
     prompt = f"{SYSTEM_INSTRUCTIONS}\n\n=== RESUME TEXT ===\n{document}"
 
     raw_json = provider.complete_json(prompt, ExtractedProfile.model_json_schema())
@@ -237,7 +240,7 @@ def extract_posting(raw_text: str) -> ExtractedPosting:
             MAX_POSTING_CHARS,
         )
 
-    provider = get_provider()
+    provider = get_provider("posting")
     prompt = f"{POSTING_INSTRUCTIONS}\n\n=== JOB POSTING TEXT ===\n{document}"
 
     raw_json = provider.complete_json(prompt, ExtractedPosting.model_json_schema())

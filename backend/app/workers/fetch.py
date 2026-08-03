@@ -265,6 +265,36 @@ def _get_following_redirects(client: httpx.Client, url: str) -> tuple[bytes, str
     raise PermanentFetchError(f"too many redirects for {url}")
 
 
+def _decode(body: bytes, encoding: str) -> str:
+    """Decode `body`, falling back to UTF-8 when the declared charset is unknown.
+
+    `errors="replace"` covers bad *bytes*. It does nothing for a charset no
+    codec implements: a server is free to answer `charset=utf8mb4`, or a typo,
+    and `bytes.decode` raises LookupError before any byte is examined.
+
+    That exception is why this function exists rather than an inline decode.
+    LookupError is neither TransientFetchError nor PermanentFetchError, so it
+    escapes the classification this module exists to provide, reaches the
+    worker's `except Exception`, and is re-raised -- which means RQ applies the
+    retry policy and spends three attempts re-learning that the charset is
+    still not a codec. Exactly the waste the transient/permanent split was
+    built to prevent, arriving through the one door it does not cover.
+
+    Falling back rather than failing, because a declared-but-unknown charset is
+    a defect in a header rather than a document that cannot be read. The bytes
+    are nearly always UTF-8 or close enough that replacement characters cost a
+    few glyphs; discarding a recoverable posting over a bad header would be the
+    more expensive direction of the same mistake.
+    """
+    try:
+        return body.decode(encoding, errors="replace")
+    except LookupError:
+        logger.info(
+            "fetch: server declared unknown charset %r; decoding as utf-8", encoding
+        )
+        return body.decode("utf-8", errors="replace")
+
+
 def fetch_posting_text(url: str, limiter: RateLimiter | None = None) -> str:
     """Fetch `url` and return its readable text.
 
@@ -308,5 +338,5 @@ def fetch_posting_text(url: str, limiter: RateLimiter | None = None) -> str:
 
         body, encoding = _get_following_redirects(client, url)
 
-    html = body.decode(encoding, errors="replace")
+    html = _decode(body, encoding)
     return html_to_text(html)

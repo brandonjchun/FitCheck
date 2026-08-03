@@ -131,10 +131,15 @@ export const jobApi = {
 export const batchApi = {
   /* profile_id rides in the query string, not the form body. The endpoint
    * declares it as a path-level parameter alongside the multipart file, so
-   * appending it to the FormData would leave it unread and 422. */
-  create: (profileId: number, file: File) => {
+   * appending it to the FormData would leave it unread and 422.
+   *
+   * A `File` becomes the `file` part and a `string` becomes the `urls` part.
+   * The endpoint rejects both-at-once, so this sends exactly one -- the union
+   * is what makes that unrepresentable here rather than merely unlikely. */
+  create: (profileId: number, source: File | string) => {
     const form = new FormData();
-    form.append("file", file);
+    if (typeof source === "string") form.append("urls", source);
+    else form.append("file", source);
     return api
       .post<BatchCreated>("/api/batches", form, { params: { profile_id: profileId } })
       .then((r) => r.data);

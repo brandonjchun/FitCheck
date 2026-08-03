@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.main import app
-from app.models import IngestJob, Profile, UrlBatch, User, hash_url
+from app.models import IngestJob, Profile, UrlBatch, User, hash_url, dedupe_key_for_submission
 from app.queues import MAX_RETRIES, QUEUE_INGEST, QUEUE_INTERACTIVE
 
 OPS = "/api/ops"
@@ -114,6 +114,7 @@ def make_job(profile_id: int, *, status="dead", url=None, batch_id=None) -> int:
     db = SessionLocal()
     try:
         job = IngestJob(
+            dedupe_key=dedupe_key_for_submission(profile_id, hash_url(url)),
             profile_id=profile_id,
             batch_id=batch_id,
             url=url,

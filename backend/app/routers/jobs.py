@@ -8,7 +8,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import IngestJob, Profile, User, hash_url
+from app.models import (
+    IngestJob,
+    Profile,
+    User,
+    dedupe_key_for_submission,
+    hash_url,
+)
 from app.queues import (
     FAILURE_TTL,
     JOB_TIMEOUT,
@@ -92,6 +98,11 @@ def submit_job(
         return existing
 
     job = IngestJob(
+        kind="ingest_posting",
+        # Scoped to the profile: two candidates submitting the same posting
+        # are two legitimate jobs, because a match is per-profile and one
+        # fetch cannot produce two of them.
+        dedupe_key=dedupe_key_for_submission(payload.profile_id, url_digest),
         profile_id=payload.profile_id,
         url=url,
         url_hash=url_digest,

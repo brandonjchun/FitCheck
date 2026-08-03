@@ -13,7 +13,7 @@ import pytest
 
 from app.db import SessionLocal
 from app.extraction import PROFILE_EXTRACTION_VERSION, ExtractedProfile
-from app.models import IngestJob, JobPosting, Profile, hash_url
+from app.models import IngestJob, JobPosting, Profile, hash_url, dedupe_key_for_submission
 from app.providers import LLMPermanentError, LLMTransientError
 from app.queues import QUEUE_INGEST, QUEUE_INTERACTIVE, QUEUE_SCORING
 from app.workers import tasks
@@ -56,6 +56,9 @@ def job_id(profile_id):
             url="https://example.com/posting",
             url_hash=hash_url("https://example.com/posting"),
             status="queued",
+            dedupe_key=dedupe_key_for_submission(
+                profile_id, hash_url("https://example.com/posting")
+            ),
         )
         db.add(job)
         db.commit()
@@ -334,6 +337,7 @@ class TestProcessJobUrl:
                     url=url,
                     url_hash=hash_url(url),
                     status="queued",
+                    dedupe_key=dedupe_key_for_submission(profile.id, hash_url(url)),
                 )
                 db.add(job)
                 db.commit()
@@ -380,6 +384,7 @@ class TestProcessJobUrl:
                     url=url,
                     url_hash=hash_url(url),
                     status="queued",
+                    dedupe_key=dedupe_key_for_submission(profile.id, hash_url(url)),
                 )
                 db.add(job)
                 db.commit()

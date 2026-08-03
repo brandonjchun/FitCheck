@@ -6,7 +6,11 @@ WORKED EXAMPLE. Read this, then write providers/ollama.py by analogy.
 from typing import Any
 
 from app.config import settings
-from app.providers.base import LLMPermanentError, LLMTransientError
+from app.providers.base import (
+    LLMPermanentError,
+    LLMQuotaError,
+    LLMTransientError,
+)
 
 
 class GeminiProvider:
@@ -64,6 +68,16 @@ def _classify(exc: Exception) -> LLMTransientError | LLMPermanentError:
     """
     text = str(exc).lower()
 
+    # Quota first, and before the permanent markers -- a 429 body mentions
+    # "billing details", and "invalid" appearing anywhere in that prose would
+    # otherwise classify an exhausted quota as permanent and dead-letter work
+    # that resets on its own in under a minute.
+    quota_markers = ("quota", "resource_exhausted", "too_many_requests", "rate limit")
+    if any(marker in text for marker in quota_markers):
+        return LLMQuotaError(
+            f"Gemini quota exhausted: {exc}", retry_after_seconds=_retry_after(str(exc))
+        )
+
     permanent_markers = ("api key", "unauthorized", "permission", "not found", "invalid")
     if any(marker in text for marker in permanent_markers):
         return LLMPermanentError(f"Gemini rejected the request permanently: {exc}")
@@ -71,3 +85,17 @@ def _classify(exc: Exception) -> LLMTransientError | LLMPermanentError:
     # Default to transient. Getting this backwards in the safe direction costs
     # a few wasted retries; the other way silently drops recoverable work.
     return LLMTransientError(f"Gemini call failed, retryable: {exc}")
+
+
+def _retry_after(message: str) -> float | None:
+    """Pull Gemini's own "retry in 49.7s" out of the error body.
+
+    Text-matched, like the classification above and for the same reason: the
+    structured field lives on an SDK exception type this module declines to
+    import. Returns None when absent, and the caller falls back to a
+    configured cooldown.
+    """
+    import re
+
+    match = re.search(r"retry in ([0-9]+(?:\.[0-9]+)?)\s*s", message, re.IGNORECASE)
+    return float(match.group(1)) if match else None

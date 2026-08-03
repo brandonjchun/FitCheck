@@ -41,6 +41,20 @@ JobStatus = Literal["queued", "running", "succeeded", "failed", "dead"]
 
 TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "dead"})
 
+# Consecutive failed crawls before a source is rested. Spec section 9 item 7.
+#
+# Five rather than one, because boards have bad minutes: a single 503 is
+# noise and tripping on it would disable a healthy board. Five in a row at a
+# daily interval is five days of a board being genuinely broken, which is
+# past the point where continuing to ask is useful to anyone.
+MAX_CONSECUTIVE_FAILURES = 5
+
+# What a discover job produces versus what fetches one page. Carried on the
+# job row so the ops dashboard can tell a crawl tick apart from the hundreds
+# of fetches it fans out into -- without it, a board being enumerated and a
+# board being scraped look identical in the queue.
+JobKind = Literal["ingest_posting", "discover"]
+
 
 class User(Base):
     """One account. Identity for everything a person owns.
@@ -306,6 +320,46 @@ def hash_url(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+# --- dedupe keys -------------------------------------------------------
+#
+# What makes two in-flight jobs "the same work". Built by the caller rather
+# than derived from the row, because only the caller knows: two people
+# submitting one URL are two legitimate jobs, while two crawl ticks finding
+# one posting are not. The partial unique index on (kind, dedupe_key) is what
+# enforces whatever these say.
+
+
+def dedupe_key_for_submission(profile_id: int, url_hash: str) -> str:
+    """A user submitting a URL for one of their profiles.
+
+    Scoped to the profile, so two candidates submitting the same posting each
+    get their own fetch and their own score -- which is correct, because a
+    match is per-profile and one job cannot produce two of them.
+    """
+    return f"profile:{profile_id}:{url_hash}"
+
+
+def dedupe_key_for_crawl(canonical_key: str) -> str:
+    """The crawler finding a posting on a board.
+
+    Scoped globally rather than per-profile, and that is the whole difference
+    from the above: a crawled posting enters the shared catalog, so two
+    sources listing the same job must collapse to one fetch. Scoring against
+    individual profiles happens later, from the catalog, by a different job.
+    """
+    return f"posting:{canonical_key}"
+
+
+def dedupe_key_for_discover(source_id: int) -> str:
+    """One crawl tick for one board.
+
+    This is the key that makes overlapping ticks safe. A daily schedule that
+    fires while yesterday's crawl is still draining would otherwise enumerate
+    the board twice and double the fan-out.
+    """
+    return f"discover:{source_id}"
+
+
 def canonical_key_for_url(url: str) -> str:
     """Global dedupe key for a user-submitted one-off URL.
 
@@ -379,9 +433,23 @@ class JobPosting(Base):
     # index on it. These five have a known shape, so there is nothing to guess
     # and no reason to make M7 ship a migration alongside its scoring code.
     #
-    # One sibling is still deliberately absent: `source_id`, a foreign key to
-    # a `sources` table that does not exist until M8, which Postgres would
-    # refuse outright.
+    # Which board this came from, or NULL for a user-submitted one-off URL.
+    source_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("sources.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # The board's own last-changed timestamp, for boards that publish one.
+    #
+    # The cheap half of re-crawl economics. A content hash can only tell you
+    # a posting is unchanged *after* you have fetched it; this tells you
+    # before, so a daily crawl of a stable board fetches almost nothing
+    # instead of everything. NULL for boards that do not offer it (Lever,
+    # Ashby) -- which is fine, because those hand back the full description
+    # in the listing and their hash is free.
+    source_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     company: Mapped[str | None] = mapped_column(Text, nullable=True)
     location: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -509,12 +577,33 @@ class IngestJob(Base):
         # "does this already exist?" check races: two concurrent submissions
         # both read "no", both insert, and you have scraped the same page
         # twice. The database is the only place this can be decided.
-        UniqueConstraint(
-            "profile_id", "url_hash", name="ingest_jobs_profile_url_uniq"
+        #
+        # **Partial, on in-flight work only** (spec section 5.4). The earlier
+        # form was a plain UNIQUE (profile_id, url_hash), which was right
+        # while every job came from a person and wrong the moment a crawler
+        # exists: a daily re-crawl of the same board submits the same URLs
+        # every day, and a total constraint would reject every tick after the
+        # first. Restricting it to `queued` and `running` means two crawl
+        # ticks overlapping still collapse to one job, while yesterday's
+        # completed row stays as the audit log without blocking today.
+        #
+        # Keyed on (kind, dedupe_key) rather than on profile_id, because a
+        # crawler job has no profile. Postgres treats NULLs as distinct in a
+        # unique index, so a nullable profile_id in the old constraint would
+        # have silently stopped constraining anything at all -- the failure
+        # mode being duplicate outbound fetches, with the index still present
+        # and looking like it worked.
+        Index(
+            "ingest_jobs_inflight_uniq",
+            "kind",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("status IN ('queued', 'running')"),
         ),
         # Postgres does NOT index foreign keys automatically (unlike primary
         # keys). Without this, "all jobs for this profile" is a seq scan.
         Index("ix_ingest_jobs_profile_id", "profile_id"),
+        Index("ix_ingest_jobs_source_id", "source_id"),
         # The ops dashboard's hot path: count/filter by state.
         Index("ix_ingest_jobs_status", "status"),
         Index("ix_ingest_jobs_created_at", "created_at"),
@@ -524,12 +613,52 @@ class IngestJob(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
 
-    profile_id: Mapped[int] = mapped_column(
+    # What this job does. `ingest_posting` fetches one page; `discover`
+    # enumerates a whole board and fans out into hundreds of the former.
+    #
+    # Needed on the row rather than inferred, because the two are
+    # indistinguishable from outside: both are ingest_jobs, both have a URL,
+    # and an ops dashboard showing 400 rows cannot otherwise tell one crawl
+    # tick from the 399 fetches it produced.
+    kind: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="ingest_posting"
+    )
+
+    # What makes this job a duplicate of another in-flight one. Built by the
+    # caller, because only the caller knows what "the same work" means:
+    # `profile:{id}:{url_hash}` for a user submission, since two people
+    # submitting one URL are two legitimate jobs; `posting:{canonical_key}`
+    # for a crawled page, since two boards listing one posting are not;
+    # `discover:{source_id}` for a crawl tick.
+    # NOT NULL with no default on purpose. An empty-string default would let
+    # a caller that forgets this insert successfully, and then collide with
+    # every *other* caller that forgot -- surfacing as a unique violation on a
+    # key nobody set, in whichever unrelated code path ran second. Requiring
+    # it moves the failure to the line that omitted it.
+    dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # NULL for crawler-originated work, which belongs to no candidate.
+    #
+    # This is the column M8 forced open. It was NOT NULL while every job came
+    # from somebody clicking submit, and Path B's whole premise is a catalog
+    # built ahead of anyone asking for it -- a discovered posting is scored
+    # against profiles later, by a different job, rather than being submitted
+    # on behalf of one.
+    profile_id: Mapped[int | None] = mapped_column(
         BigInteger,
         # CASCADE: a job is meaningless without the candidate it was submitted
         # for, so deleting a profile should not leave orphaned work records.
         ForeignKey("profiles.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
+    )
+
+    # Which board produced this job, or NULL for a user submission. SET NULL
+    # rather than CASCADE: removing a source should stop future crawls, not
+    # erase the record of what was already fetched from it.
+    source_id: Mapped[int | None] = mapped_column(
+        BigInteger,
+        ForeignKey("sources.id", ondelete="SET NULL"),
+        nullable=True,
     )
 
     # Which upload produced this job, or NULL for a single URL submission.
@@ -669,3 +798,112 @@ class Match(Base):
             f"<Match profile={self.profile_id} posting={self.job_posting_id} "
             f"score={self.final_score:.3f}>"
         )
+
+
+# What kind of board a source is, which decides which adapter enumerates it.
+#
+# Text rather than an enum for the same reason `status` is: adding a kind is
+# a no-op on a text column and an ALTER TYPE on an enum, and the set of job
+# boards worth crawling is exactly the sort of thing that grows.
+SourceKind = Literal["greenhouse", "lever", "ashby", "careers_page"]
+
+
+class Source(Base):
+    """One board we crawl on a schedule.
+
+    Path B's input. A source names a company's job board and carries the
+    state a crawler needs to be a good citizen about it: whether it is
+    enabled, how often to look, when it was last *attempted*, and when it
+    last *succeeded*.
+
+    Those last two are deliberately separate columns rather than one, and the
+    distinction is load-bearing rather than bookkeeping -- see
+    `last_success_at`.
+    """
+
+    __tablename__ = "sources"
+    __table_args__ = (
+        # One row per board. Re-seeding is then an upsert rather than a
+        # careful check, and a duplicated source would double every crawl
+        # against somebody else's server.
+        UniqueConstraint("kind", "board_token", name="sources_kind_token_uniq"),
+        # The scheduler's query: which sources are due. Partial on `enabled`
+        # so a disabled board is not merely filtered out but never visited by
+        # the index at all.
+        Index(
+            "ix_sources_due",
+            "last_crawled_at",
+            postgresql_where=text("enabled"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # The company slug in the board URL -- `anthropic` in
+    # boards-api.greenhouse.io/v1/boards/anthropic/jobs. Stored rather than a
+    # full URL because the adapter owns the URL shape: a board that moves
+    # endpoints is then one change in one adapter instead of a data migration
+    # across every row.
+    board_token: Mapped[str] = mapped_column(Text, nullable=False)
+
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Kill switch, no deploy required. Spec section 9 item 7 -- one board that
+    # starts 403ing should not consume the retry budget for a week, and the
+    # fix has to be available at 2am without a release.
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+
+    crawl_interval_seconds: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="86400"
+    )
+
+    # When a crawl was last *attempted*.
+    last_crawled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # When a crawl last *completed a full enumeration without error*.
+    #
+    # Separate from `last_crawled_at`, and the separation is the whole reason
+    # closure detection is safe. "This posting is gone, so it must be closed"
+    # is only sound if the list we compared against was complete. If
+    # enumeration returned three pages and then timed out, the postings on
+    # page four are absent from our view and present in reality -- and running
+    # the closure UPDATE would tombstone an entire board out of every user's
+    # feed, silently, with no error anywhere.
+    #
+    # Two columns make "attempted but did not finish" representable. One
+    # column cannot express it, which is how that bug gets written.
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Circuit breaker state. Reset to zero on any success, so this counts
+    # *consecutive* failures rather than lifetime ones -- a board that fails
+    # once a week forever is healthy, and a board that has failed five times
+    # in a row is not.
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    @property
+    def circuit_open(self) -> bool:
+        """Whether this source is being rested after repeated failures.
+
+        A property rather than a stored boolean so it cannot drift from the
+        counter it is derived from -- the same reasoning as `is_open` on
+        JobPosting. Two columns encoding one fact is one of them eventually
+        being wrong.
+        """
+        return self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+
+    def __repr__(self) -> str:
+        return f"<Source {self.kind}:{self.board_token} enabled={self.enabled}>"

@@ -88,20 +88,66 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     db_max_overflow: int = 5
 
-    # --- LLM extraction (M2) ---
-    # Which provider backs structured extraction. Both are implemented; this
-    # decides which one get_provider() returns. Flip it in .env, restart, done
-    # -- no code change, which is the point of the abstraction.
-    llm_provider: Literal["gemini", "ollama"] = "gemini"
+    # --- LLM extraction (M2, split per task at M8) ---
+    # Which provider backs each kind of extraction. Two settings rather than
+    # one, because the two tasks have opposite requirements and one global
+    # value has to be wrong for one of them.
+    #
+    # Resumes stay on Gemini: roughly one call per signup, and the quality gap
+    # is real -- 10 skills with inferred years against a local model's 6, and
+    # a seniority of "mid" where local returns "unknown". Every downstream
+    # score reads this, so it is the wrong place to economise.
+    llm_provider_profile: Literal["gemini", "ollama"] = "gemini"
+
+    # Postings go local. Measured on a real posting, llama3.1:8b returned the
+    # same five skills as Gemini with 5/5 verbatim evidence, in 11s against
+    # 20s. And the volume is what forces it: the Gemini free tier is 20
+    # requests per day, so a single 300-posting crawl would take two weeks.
+    llm_provider_posting: Literal["gemini", "ollama"] = "ollama"
+
+    # Where work goes when the provider above reports its quota exhausted.
+    # None disables the fallback entirely, and a job then fails and retries
+    # against the same exhausted provider -- correct if you would rather wait
+    # for quality than proceed at lower quality, which is a real preference
+    # and not the default one.
+    llm_fallback_provider: Literal["gemini", "ollama"] | None = "ollama"
+
+    # How long to route around a provider when it gives no estimate of its
+    # own. Four hours is a compromise between the two limits Gemini's free
+    # tier enforces: a per-minute cap that clears in under a minute, and a
+    # per-day cap that clears at midnight Pacific. When the error names a
+    # retry delay -- and Gemini's does -- that number is used instead and
+    # this is never consulted.
+    llm_quota_cooldown_seconds: int = 4 * 60 * 60
+
+    # Nothing routes around a provider for longer than this, however large an
+    # estimate it returns. A provider answering "retry in 30 days" would
+    # otherwise silently become permanent, and a config value nobody
+    # remembers setting is a worse outage than a daily one.
+    llm_quota_max_cooldown_seconds: int = 24 * 60 * 60
 
     # Gemini: free tier key from aistudio.google.com. Optional so the app can
     # start on the ollama path without one.
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
 
-    # Ollama: local daemon, no key. Default host is the standard local port.
-    ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "llama3.1"
+    # Ollama: local daemon, no key.
+    #
+    # `host.docker.internal` rather than `localhost`, because the workers that
+    # do the extracting run in containers and `localhost` there is the
+    # container itself. Pointing at localhost from inside one produces
+    # connection-refused, which app/providers/ollama.py classifies as
+    # transient -- so it retries with backoff, forever, against nothing.
+    # Docker Desktop resolves this name to the host; on Linux the compose
+    # file adds the corresponding extra_hosts entry.
+    ollama_host: str = "http://host.docker.internal:11434"
+
+    # 8B rather than the 14B also installed. Measured on the same resume,
+    # llama3.1:8b quoted verbatim evidence for 29 of 33 skills where
+    # qwen2.5:14b managed 2 of 16 -- nearly twice the parameters and far worse
+    # at the single instruction that makes an extraction auditable. Parameter
+    # count is not the axis that matters here.
+    ollama_model: str = "llama3.1:8b-instruct-q4_K_M"
 
     # --- Outbound fetching (M5) ---
     # Identify the crawler honestly, with a way to be contacted. Impersonating

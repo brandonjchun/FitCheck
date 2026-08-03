@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 
 from app.db import SessionLocal
 from app.main import app
-from app.models import IngestJob, Profile, hash_url
+from app.models import IngestJob, Profile, hash_url, dedupe_key_for_submission
 
 
 @pytest.fixture
@@ -55,7 +55,11 @@ def _make_job(profile_id: int, url: str = "https://example.com/p") -> int:
     db = SessionLocal()
     try:
         job = IngestJob(
-            profile_id=profile_id, url=url, url_hash=hash_url(url), status="queued"
+            profile_id=profile_id,
+            url=url,
+            url_hash=hash_url(url),
+            status="queued",
+            dedupe_key=dedupe_key_for_submission(profile_id, hash_url(url)),
         )
         db.add(job)
         db.commit()
