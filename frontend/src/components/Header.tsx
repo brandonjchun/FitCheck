@@ -82,9 +82,14 @@ export function Header() {
               <NavLink to="/app" className="btn btn-ghost">
                 Workspace
               </NavLink>
-              <NavLink to="/ops" className="btn btn-ghost">
-                Ops
-              </NavLink>
+              {/* Hidden rather than shown-and-refused. This is presentation
+                * only -- the server checks the same flag on every ops request
+                * and a forged client gains nothing but a different error. */}
+              {user.is_admin && (
+                <NavLink to="/ops" className="btn btn-ghost">
+                  Ops
+                </NavLink>
+              )}
               <button
                 className="btn btn-ghost"
                 onClick={() => logout.mutate()}

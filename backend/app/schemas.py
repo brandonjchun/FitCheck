@@ -100,6 +100,12 @@ class UserResponse(BaseModel):
     email: str
     created_at: datetime
 
+    # Exposed so the client can avoid offering a link that would only 403.
+    # This is presentation, not enforcement -- the server checks the same flag
+    # on every ops request, and a client that lies to itself about this gains
+    # nothing but a different error message.
+    is_admin: bool = False
+
 
 class BatchCreateResponse(BaseModel):
     """What POST /api/batches returns once a URL list has been accepted.

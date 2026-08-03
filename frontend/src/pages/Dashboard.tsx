@@ -177,20 +177,53 @@ function DeadLetterRow({ item }: { item: DeadLetterItem }) {
 export function Dashboard() {
   const { data: user, isLoading: authLoading } = useMe();
 
+  // Gated on the flag so a non-admin who lands here does not sit in a
+  // three-second 403 loop against an endpoint that will never answer. The
+  // hooks still run unconditionally -- React requires that -- but `enabled`
+  // stops the fetch rather than the render.
+  const isAdmin = !!user?.is_admin;
+
   const overview = useQuery({
     queryKey: ["ops", "overview"],
     queryFn: opsApi.overview,
     refetchInterval: OPS_POLL_MS,
+    enabled: isAdmin,
   });
 
   const dead = useQuery({
     queryKey: ["ops", "dead-letter"],
     queryFn: () => opsApi.deadLetter(25),
     refetchInterval: OPS_POLL_MS * 4,
+    enabled: isAdmin,
   });
 
   if (authLoading) return null;
   if (!user) return <Navigate to="/signin" replace />;
+
+  // Rendered rather than redirected. A signed-in user who reached this URL
+  // deliberately is better served by being told why they cannot see it than
+  // by being bounced somewhere else with no explanation -- and the server has
+  // already refused, so nothing is being protected by hiding the page.
+  if (!user.is_admin) {
+    return (
+      <main id="main" className="dashboard">
+        <div className="container">
+          <div className="alert" role="alert">
+            <strong>Operator access required</strong>
+            <p>
+              This page reports system-wide state — queue depth, worker health,
+              and failed jobs across every account — so it is limited to
+              operators. Your account is signed in but does not have the flag.
+            </p>
+            <p>
+              It is granted out of band; there is deliberately no endpoint that
+              grants it.
+            </p>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   const data = overview.data;
   const problems = data?.queues.filter((q) => verdictFor(q).tone === "bad") ?? [];

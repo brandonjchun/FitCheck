@@ -6,13 +6,15 @@ not convenience. `/api/jobs` carries a mandatory ownership join -- it answers
 doing", which is a cross-user question and therefore a different contract
 with a different threat model.
 
-**Known limitation, stated rather than hidden.** These are gated on being
-signed in, not on being an operator, because there is no role model yet and
-adding one is a migration. For a single-operator course project that is an
-acceptable trade; for anything multi-tenant it is not, and the fix is an
-`is_admin` column plus a `require_admin` dependency alongside
-`current_user`. Nothing here returns another user's resume text or personal
-data -- the exposure is counts, queue names, job ids, and error strings.
+Gated on `require_admin`, not merely on being signed in. What is exposed is
+counts, queue names, job ids, and error strings -- no resume text and no
+personal data -- but it is the whole system rather than the caller's own
+rows, and "anyone who can register" is the wrong audience for that. A
+`last_error` from a failed fetch can quote a URL somebody else submitted,
+which on its own is enough reason not to leave this open.
+
+The flag is granted out of band with SQL; see models.User.is_admin for why
+no endpoint grants it.
 """
 
 import logging
@@ -46,11 +48,11 @@ from app.schemas import (
     StatusCount,
     WorkerInfo,
 )
-from app.security import current_user
+from app.security import require_admin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/ops", tags=["ops"], dependencies=[Depends(current_user)])
+router = APIRouter(prefix="/api/ops", tags=["ops"], dependencies=[Depends(require_admin)])
 
 
 def _discover_redis_queues() -> set[str]:

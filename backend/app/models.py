@@ -65,12 +65,29 @@ class User(Base):
     # row records the parameters it was made with.
     password_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # Operator flag, not a role table. One boolean is the honest shape for a
+    # system with exactly two levels of access: everyone, and whoever may read
+    # system-wide state. A `roles` table plus a join would be more general and
+    # would encode no more information than this does -- add it when a third
+    # level actually exists, not in anticipation of one.
+    #
+    # Granted out of band. There is deliberately no endpoint that sets this:
+    # an API that can promote an account is a privilege-escalation target
+    # bought for the price of saving one UPDATE. Promote with SQL.
+    #
+    # NOT NULL with a false default, so a new account is never ambiguously
+    # privileged. A nullable flag has to be interpreted somewhere, and the
+    # interpretation written by accident is always the permissive one.
+    is_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
     def __repr__(self) -> str:
-        return f"<User id={self.id} email={self.email!r}>"
+        return f"<User id={self.id} email={self.email!r} admin={self.is_admin}>"
 
 
 class Profile(Base):

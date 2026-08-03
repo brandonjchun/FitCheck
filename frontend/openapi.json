@@ -1,1 +1,1425 @@
-{"openapi":"3.1.0","info":{"title":"FitCheck","description":"Resume/JD matching pipeline with explainable scoring.","version":"0.1.0"},"paths":{"/health":{"get":{"summary":"Health","description":"Liveness probe. Returns 200 if the process is up and serving.","operationId":"health_health_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"additionalProperties":{"type":"string"},"type":"object","title":"Response Health Health Get"}}}}}}},"/api/auth/register":{"post":{"tags":["auth"],"summary":"Register","description":"Create an account and start a session for it.\n\nRegistration necessarily reveals whether an address is taken -- there is\nno way to both refuse a duplicate and conceal that it exists. Login is\nwhere the disclosure actually matters, and that path stays silent.","operationId":"register_api_auth_register_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/RegisterRequest"}}},"required":true},"responses":{"201":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UserResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/auth/login":{"post":{"tags":["auth"],"summary":"Login","description":"Exchange credentials for a session cookie.","operationId":"login_api_auth_login_post","requestBody":{"content":{"application/json":{"schema":{"$ref":"#/components/schemas/LoginRequest"}}},"required":true},"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UserResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/auth/logout":{"post":{"tags":["auth"],"summary":"Logout","description":"End the current session.\n\nDeliberately not requiring `current_user`. Logging out with an already\ninvalid session is not an error -- it is the state the caller was asking\nfor, and answering 401 would leave a confused client apparently unable to\nlog out.","operationId":"logout_api_auth_logout_post","responses":{"204":{"description":"Successful Response"}}}},"/api/auth/me":{"get":{"tags":["auth"],"summary":"Me","description":"Who the caller is. 401 when nobody.\n\nThis is the client's auth state: a query, not something mirrored into\napplication state that then has to be kept in sync. `no-store` because a\ncached identity is how one user is shown another's account.","operationId":"me_api_auth_me_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/UserResponse"}}}}}}},"/api/profiles":{"post":{"tags":["profiles"],"summary":"Upload Resume","description":"Accept a resume upload, store its text, and queue structured extraction.\n\nText extraction is synchronous -- it is local CPU work measured in\nmilliseconds. LLM extraction is not: it measured 26s on Gemini and 57s on\na local model, and it used to run right here, holding the request open\nthe entire time. It is now enqueued instead.\n\nSo this returns 201, not 202. A profile really is created and immediately\nreadable at GET /api/profiles/{id}; only its structured fields arrive\nlater. `extraction_ok` is false until the worker finishes, and the client\npolls that endpoint the same way it polls a job.","operationId":"upload_resume_api_profiles_post","requestBody":{"content":{"multipart/form-data":{"schema":{"$ref":"#/components/schemas/Body_upload_resume_api_profiles_post"}}},"required":true},"responses":{"201":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ProfileUploadResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/profiles/{profile_id}":{"get":{"tags":["profiles"],"summary":"Get Profile","description":"Fetch one profile. Polled until `extraction_ok` turns true.\n\nTakes `owned_profile` rather than an id plus a lookup, so the ownership\npredicate is structural. There is no version of this handler that\naccidentally serves someone else's resume, because it never had the\nchance to load one.","operationId":"get_profile_api_profiles__profile_id__get","parameters":[{"name":"profile_id","in":"path","required":true,"schema":{"type":"integer","title":"Profile Id"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ProfileUploadResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/profiles/{profile_id}/extract":{"post":{"tags":["profiles"],"summary":"Reextract Profile","description":"Re-run extraction for a profile whose earlier attempt failed.\n\nCloses the gap where a provider outage left a profile permanently\nun-scoreable with no way to retry it. Safe to call on an\nalready-extracted profile: the task checks and returns early rather than\nspending a second API call.\n\nOwnership matters more here than on a read. This endpoint spends an LLM\ncall, so without the predicate anyone could run up the bill on someone\nelse's profile ids.","operationId":"reextract_profile_api_profiles__profile_id__extract_post","parameters":[{"name":"profile_id","in":"path","required":true,"schema":{"type":"integer","title":"Profile Id"}}],"responses":{"202":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/ProfileUploadResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/jobs":{"post":{"tags":["jobs"],"summary":"Submit Job","description":"Queue a job-posting URL for processing.\n\nReturns **202 Accepted**, not 201. The distinction is the whole point of\nthis milestone: 201 would promise the work is done and the result is\navailable at the returned location. 202 promises only that the request\nwas accepted for processing -- which is exactly the truth, because\nfetching an arbitrary URL takes 200ms to 30s, fails often, and cannot\nhappen inside a request handler.\n\nSubmitting the same URL twice for the same profile returns the existing\njob rather than creating a duplicate scrape.","operationId":"submit_job_api_jobs_post","requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/JobSubmitRequest"}}}},"responses":{"202":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/JobResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}},"get":{"tags":["jobs"],"summary":"List Jobs","description":"List jobs, newest first. Filterable by profile and status.\n\nBoth filters hit indexed columns. This is the query the M10 ops dashboard\nis built on -- `?status=dead` is the dead-letter list.\n\nThe ownership join is not optional and not a filter the caller supplies.\n`?profile_id=` narrows within what this user owns; it cannot widen beyond\nit, so passing someone else's id returns an empty list rather than their\njobs. A listing endpoint is the easiest place to leak everything at once,\nbecause one missing predicate returns every row in the table instead of\none.","operationId":"list_jobs_api_jobs_get","parameters":[{"name":"profile_id","in":"query","required":false,"schema":{"anyOf":[{"type":"integer"},{"type":"null"}],"title":"Profile Id"}},{"name":"status","in":"query","required":false,"schema":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Status"}},{"name":"limit","in":"query","required":false,"schema":{"type":"integer","default":50,"title":"Limit"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/JobResponse"},"title":"Response List Jobs Api Jobs Get"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/jobs/{job_id}":{"get":{"tags":["jobs"],"summary":"Get Job","description":"Current state of one job. This is the endpoint the frontend polls.\n\nSets `Cache-Control: no-store` because a cached job status is worse than\nuseless -- a proxy holding a `queued` response for 30 seconds makes the\nUI look stuck when the work has already finished.\n\nOwnership is inherited through the profile rather than stored on the job.\nA job belongs to whoever owns the resume it was submitted for, so joining\nkeeps one source of truth; a `user_id` column here could disagree with\n`profiles.user_id` and there would be no way to say which was right.","operationId":"get_job_api_jobs__job_id__get","parameters":[{"name":"job_id","in":"path","required":true,"schema":{"type":"integer","title":"Job Id"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/JobResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/batches":{"post":{"tags":["batches"],"summary":"Create Batch","description":"Accept a URL list and fan it out onto the ingest queue.\n\n202, not 201: nothing has been fetched. The batch row exists and N jobs\nare queued, which is exactly what \"accepted for processing\" means.\n\nParsing happens in the handler rather than in a job. It is line splitting\nand string normalization over an already-uploaded file -- microseconds,\nlocal CPU, no network -- so pushing it onto a queue would add a round\ntrip and a second polling state to save nothing. The expensive part is\nthe N fetches, and those are queued.","operationId":"create_batch_api_batches_post","parameters":[{"name":"profile_id","in":"query","required":true,"schema":{"type":"integer","title":"Profile Id"}}],"requestBody":{"required":true,"content":{"multipart/form-data":{"schema":{"$ref":"#/components/schemas/Body_create_batch_api_batches_post"}}}},"responses":{"202":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/BatchCreateResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}},"get":{"tags":["batches"],"summary":"List Batches","description":"This user's batches, newest first.\n\nScoped by ownership before any caller-supplied parameter is applied, so\nthere is no argument that widens the result past what this user owns.","operationId":"list_batches_api_batches_get","parameters":[{"name":"limit","in":"query","required":false,"schema":{"type":"integer","default":20,"title":"Limit"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/BatchStatusResponse"},"title":"Response List Batches Api Batches Get"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/batches/{batch_id}":{"get":{"tags":["batches"],"summary":"Get Batch","description":"Aggregate progress for one batch. This is what the client polls.\n\nOne query for the whole batch. The alternative -- the client polling N\njob endpoints -- turns a 500-item progress view into 250 requests per\nsecond at a 2s interval, which would make the progress display the\nheaviest thing in the system.","operationId":"get_batch_api_batches__batch_id__get","parameters":[{"name":"batch_id","in":"path","required":true,"schema":{"type":"integer","title":"Batch Id"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/BatchStatusResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/ops/overview":{"get":{"tags":["ops"],"summary":"Overview","description":"Everything the dashboard polls, in one round trip.\n\nOne endpoint rather than five because the panels are read together and a\ndashboard that fires five requests every two seconds is its own load\nproblem. The cost here is bounded: a handful of Redis reads plus one\ngrouped SQL count.","operationId":"overview_api_ops_overview_get","responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/OpsOverview"}}}}}}},"/api/ops/dead-letter":{"get":{"tags":["ops"],"summary":"Dead Letter","description":"Jobs that exhausted their retries, newest first.\n\nSourced from Postgres rather than RQ's FailedJobRegistry because the row\nis the durable record: it survives the registry's TTL and carries the\nattempt count and the truncated error. The registry is the transport's\nview; `ingest_jobs` is ours.","operationId":"dead_letter_api_ops_dead_letter_get","parameters":[{"name":"limit","in":"query","required":false,"schema":{"type":"integer","default":50,"title":"Limit"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{"type":"array","items":{"$ref":"#/components/schemas/DeadLetterItem"},"title":"Response Dead Letter Api Ops Dead Letter Get"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}},"/api/ops/jobs/{job_id}/requeue":{"post":{"tags":["ops"],"summary":"Requeue","description":"Put a failed job back on its queue.\n\nResets `attempts` to zero. A requeue is an operator asserting the cause\nwas fixed, so the job deserves a fresh retry budget rather than\ndead-lettering again on its next tick because the counter was already\nexhausted.","operationId":"requeue_api_ops_jobs__job_id__requeue_post","parameters":[{"name":"job_id","in":"path","required":true,"schema":{"type":"integer","title":"Job Id"}}],"responses":{"202":{"description":"Successful Response","content":{"application/json":{"schema":{"$ref":"#/components/schemas/RequeueResponse"}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}}},"components":{"schemas":{"BatchCreateResponse":{"properties":{"id":{"type":"integer","title":"Id"},"profile_id":{"type":"integer","title":"Profile Id"},"filename":{"type":"string","title":"Filename"},"accepted":{"type":"integer","title":"Accepted"},"rejected":{"type":"integer","title":"Rejected"},"duplicates":{"type":"integer","title":"Duplicates"},"created_at":{"type":"string","format":"date-time","title":"Created At"}},"type":"object","required":["id","profile_id","filename","accepted","rejected","duplicates","created_at"],"title":"BatchCreateResponse","description":"What POST /api/batches returns once a URL list has been accepted.\n\nEvery line the user sent is accounted for: `accepted + rejected +\nduplicates` equals the non-blank line count of their file. A batch that\nquietly ingests 500 of someone's 4,000 lines is worse than one that\nrefuses, because they cannot tell which 3,500 are missing."},"BatchStatusResponse":{"properties":{"id":{"type":"integer","title":"Id"},"profile_id":{"type":"integer","title":"Profile Id"},"filename":{"type":"string","title":"Filename"},"total":{"type":"integer","title":"Total"},"rejected":{"type":"integer","title":"Rejected"},"duplicates":{"type":"integer","title":"Duplicates"},"created_at":{"type":"string","format":"date-time","title":"Created At"},"counts":{"additionalProperties":{"type":"integer"},"type":"object","title":"Counts"},"is_complete":{"type":"boolean","title":"Is Complete"}},"type":"object","required":["id","profile_id","filename","total","rejected","duplicates","created_at","counts","is_complete"],"title":"BatchStatusResponse","description":"Aggregate progress for one batch. The endpoint a client polls.\n\nOne request covers the whole batch rather than N requests for N jobs --\npolling 500 individual job endpoints every two seconds is how a progress\nview becomes the heaviest thing in the system.\n\nThe counts are derived by grouping jobs on `batch_id`, never read from a\nstored counter. See models.UrlBatch for why."},"Body_create_batch_api_batches_post":{"properties":{"file":{"type":"string","contentMediaType":"application/octet-stream","title":"File"}},"type":"object","required":["file"],"title":"Body_create_batch_api_batches_post"},"Body_upload_resume_api_profiles_post":{"properties":{"file":{"type":"string","contentMediaType":"application/octet-stream","title":"File"}},"type":"object","required":["file"],"title":"Body_upload_resume_api_profiles_post"},"DeadLetterItem":{"properties":{"id":{"type":"integer","title":"Id"},"url":{"type":"string","title":"Url"},"status":{"type":"string","title":"Status"},"attempts":{"type":"integer","title":"Attempts"},"last_error":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Last Error"},"updated_at":{"type":"string","format":"date-time","title":"Updated At"}},"type":"object","required":["id","url","status","attempts","updated_at"],"title":"DeadLetterItem"},"ExtractedSkill":{"properties":{"name":{"type":"string","title":"Name"},"years":{"anyOf":[{"type":"number"},{"type":"null"}],"title":"Years"},"evidence":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Evidence"},"source":{"anyOf":[{"type":"string","enum":["experience","project","education","skills_list","unknown"]},{"type":"null"}],"title":"Source"}},"type":"object","required":["name"],"title":"ExtractedSkill","description":"A skill as surfaced to clients -- canonical name plus its evidence."},"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"JobResponse":{"properties":{"id":{"type":"integer","title":"Id"},"profile_id":{"type":"integer","title":"Profile Id"},"url":{"type":"string","title":"Url"},"status":{"type":"string","enum":["queued","running","succeeded","failed","dead"],"title":"Status"},"attempts":{"type":"integer","title":"Attempts"},"last_error":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Last Error"},"created_at":{"type":"string","format":"date-time","title":"Created At"},"updated_at":{"type":"string","format":"date-time","title":"Updated At"},"is_terminal":{"type":"boolean","title":"Is Terminal"}},"type":"object","required":["id","profile_id","url","status","attempts","created_at","updated_at","is_terminal"],"title":"JobResponse","description":"A job's current state. This is what the frontend polls."},"JobSubmitRequest":{"properties":{"url":{"type":"string","maxLength":2083,"minLength":1,"format":"uri","title":"Url"},"profile_id":{"type":"integer","title":"Profile Id"},"notes":{"anyOf":[{"type":"string","maxLength":500},{"type":"null"}],"title":"Notes"}},"type":"object","required":["url","profile_id"],"title":"JobSubmitRequest","description":"Body of POST /api/jobs.\n\n`HttpUrl` is doing real work here: a malformed URL is rejected with a\nfield-level 422 before any row is written or any job enqueued. Without\nit, the bad value reaches a worker minutes later and fails there, which\nis a far worse place to discover a typo."},"LoginRequest":{"properties":{"email":{"type":"string","format":"email","title":"Email"},"password":{"type":"string","title":"Password"}},"type":"object","required":["email","password"],"title":"LoginRequest","description":"Body of POST /api/auth/login.\n\nNo length constraints. Validating the shape of a *submitted* password\ntells an attacker the policy and rejects legacy passwords that predate a\nrule change; the only question at login is whether it matches."},"OpsOverview":{"properties":{"queues":{"items":{"$ref":"#/components/schemas/QueueHealth"},"type":"array","title":"Queues"},"workers":{"items":{"$ref":"#/components/schemas/WorkerInfo"},"type":"array","title":"Workers"},"jobs_by_status":{"items":{"$ref":"#/components/schemas/StatusCount"},"type":"array","title":"Jobs By Status"},"job_timeout_seconds":{"type":"integer","title":"Job Timeout Seconds"},"result_ttl_seconds":{"type":"integer","title":"Result Ttl Seconds"},"failure_ttl_seconds":{"type":"integer","title":"Failure Ttl Seconds"}},"type":"object","required":["queues","workers","jobs_by_status","job_timeout_seconds","result_ttl_seconds","failure_ttl_seconds"],"title":"OpsOverview","description":"Everything the dashboard polls, in one response."},"ProfileUploadResponse":{"properties":{"id":{"type":"integer","title":"Id"},"filename":{"type":"string","title":"Filename"},"characters":{"type":"integer","title":"Characters"},"created_at":{"type":"string","format":"date-time","title":"Created At"},"extraction_ok":{"type":"boolean","title":"Extraction Ok"},"seniority":{"anyOf":[{"type":"string","enum":["junior","mid","senior","staff","unknown"]},{"type":"null"}],"title":"Seniority"},"years_experience":{"anyOf":[{"type":"number"},{"type":"null"}],"title":"Years Experience"},"skills":{"items":{"$ref":"#/components/schemas/ExtractedSkill"},"type":"array","title":"Skills","default":[]},"raw_text":{"type":"string","title":"Raw Text"}},"type":"object","required":["id","filename","characters","created_at","extraction_ok","raw_text"],"title":"ProfileUploadResponse","description":"What POST /api/profiles returns once a resume has been stored.\n\nfrom_attributes lets FastAPI build this from a SQLAlchemy Profile object\nby reading attributes rather than requiring a dict.\n\n`extraction_ok` is deliberately explicit. Text extraction and LLM\nextraction fail independently: a resume can parse perfectly and still\ncome back with no structured profile if the provider was down. Rather\nthan failing the upload -- which would discard raw_text we successfully\nparsed -- the row is saved with null extraction and this flag tells the\nclient which happened. A client seeing skills=[] otherwise cannot\ndistinguish \"no skills found\" from \"extraction never ran\"."},"QueueHealth":{"properties":{"name":{"type":"string","title":"Name"},"depth":{"type":"integer","title":"Depth"},"started":{"type":"integer","title":"Started"},"failed":{"type":"integer","title":"Failed"},"deferred":{"type":"integer","title":"Deferred"},"scheduled":{"type":"integer","title":"Scheduled"},"declared":{"type":"boolean","title":"Declared"},"worker_count":{"type":"integer","title":"Worker Count"}},"type":"object","required":["name","depth","started","failed","deferred","scheduled","declared","worker_count"],"title":"QueueHealth","description":"One queue's depth and the registries around it."},"RegisterRequest":{"properties":{"email":{"type":"string","format":"email","title":"Email"},"password":{"type":"string","maxLength":1024,"minLength":12,"title":"Password"}},"type":"object","required":["email","password"],"title":"RegisterRequest","description":"Body of POST /api/auth/register.\n\n`EmailStr` rejects a malformed address with a field-level 422 before any\nrow is written. The minimum length is deliberately a floor rather than a\ncomposition rule -- no \"must contain a symbol\", because those rules push\npeople toward `Password1!` and measurably reduce entropy compared with\nsimply requiring more characters."},"RequeueResponse":{"properties":{"id":{"type":"integer","title":"Id"},"status":{"type":"string","title":"Status"},"queue":{"type":"string","title":"Queue"}},"type":"object","required":["id","status","queue"],"title":"RequeueResponse"},"StatusCount":{"properties":{"status":{"type":"string","title":"Status"},"count":{"type":"integer","title":"Count"}},"type":"object","required":["status","count"],"title":"StatusCount"},"UserResponse":{"properties":{"id":{"type":"integer","title":"Id"},"email":{"type":"string","title":"Email"},"created_at":{"type":"string","format":"date-time","title":"Created At"}},"type":"object","required":["id","email","created_at"],"title":"UserResponse","description":"A user as returned to clients. Note what is absent: password_hash.\n\nThis is the concrete reason ORM models are not reused as API responses.\nReturning a `User` directly would serialize every column it has, and the\nfirst person to notice would be whoever reads the hash out of the\nresponse body."},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"},"input":{"title":"Input"},"ctx":{"type":"object","title":"Context"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"},"WorkerInfo":{"properties":{"name":{"type":"string","title":"Name"},"state":{"type":"string","title":"State"},"queues":{"items":{"type":"string"},"type":"array","title":"Queues"},"current_job_id":{"anyOf":[{"type":"string"},{"type":"null"}],"title":"Current Job Id"},"successful_jobs":{"type":"integer","title":"Successful Jobs"},"failed_jobs":{"type":"integer","title":"Failed Jobs"}},"type":"object","required":["name","state","queues","successful_jobs","failed_jobs"],"title":"WorkerInfo","description":"One RQ worker process and the queues it drains."}}}}
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FitCheck",
+    "description": "Resume/JD matching pipeline with explainable scoring.",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health",
+        "description": "Liveness probe. Returns 200 if the process is up and serving.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/register": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Register",
+        "description": "Create an account and start a session for it.\n\nRegistration necessarily reveals whether an address is taken -- there is\nno way to both refuse a duplicate and conceal that it exists. Login is\nwhere the disclosure actually matters, and that path stays silent.",
+        "operationId": "register_api_auth_register_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Login",
+        "description": "Exchange credentials for a session cookie.",
+        "operationId": "login_api_auth_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Logout",
+        "description": "End the current session.\n\nDeliberately not requiring `current_user`. Logging out with an already\ninvalid session is not an error -- it is the state the caller was asking\nfor, and answering 401 would leave a confused client apparently unable to\nlog out.",
+        "operationId": "logout_api_auth_logout_post",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Me",
+        "description": "Who the caller is. 401 when nobody.\n\nThis is the client's auth state: a query, not something mirrored into\napplication state that then has to be kept in sync. `no-store` because a\ncached identity is how one user is shown another's account.",
+        "operationId": "me_api_auth_me_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Upload Resume",
+        "description": "Accept a resume upload, store its text, and queue structured extraction.\n\nText extraction is synchronous -- it is local CPU work measured in\nmilliseconds. LLM extraction is not: it measured 26s on Gemini and 57s on\na local model, and it used to run right here, holding the request open\nthe entire time. It is now enqueued instead.\n\nSo this returns 201, not 202. A profile really is created and immediately\nreadable at GET /api/profiles/{id}; only its structured fields arrive\nlater. `extraction_ok` is false until the worker finishes, and the client\npolls that endpoint the same way it polls a job.",
+        "operationId": "upload_resume_api_profiles_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_resume_api_profiles_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/{profile_id}": {
+      "get": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Get Profile",
+        "description": "Fetch one profile. Polled until `extraction_ok` turns true.\n\nTakes `owned_profile` rather than an id plus a lookup, so the ownership\npredicate is structural. There is no version of this handler that\naccidentally serves someone else's resume, because it never had the\nchance to load one.",
+        "operationId": "get_profile_api_profiles__profile_id__get",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/{profile_id}/extract": {
+      "post": {
+        "tags": [
+          "profiles"
+        ],
+        "summary": "Reextract Profile",
+        "description": "Re-run extraction for a profile whose earlier attempt failed.\n\nCloses the gap where a provider outage left a profile permanently\nun-scoreable with no way to retry it. Safe to call on an\nalready-extracted profile: the task checks and returns early rather than\nspending a second API call.\n\nOwnership matters more here than on a read. This endpoint spends an LLM\ncall, so without the predicate anyone could run up the bill on someone\nelse's profile ids.",
+        "operationId": "reextract_profile_api_profiles__profile_id__extract_post",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProfileUploadResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Submit Job",
+        "description": "Queue a job-posting URL for processing.\n\nReturns **202 Accepted**, not 201. The distinction is the whole point of\nthis milestone: 201 would promise the work is done and the result is\navailable at the returned location. 202 promises only that the request\nwas accepted for processing -- which is exactly the truth, because\nfetching an arbitrary URL takes 200ms to 30s, fails often, and cannot\nhappen inside a request handler.\n\nSubmitting the same URL twice for the same profile returns the existing\njob rather than creating a duplicate scrape.",
+        "operationId": "submit_job_api_jobs_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobSubmitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "List Jobs",
+        "description": "List jobs, newest first. Filterable by profile and status.\n\nBoth filters hit indexed columns. This is the query the M10 ops dashboard\nis built on -- `?status=dead` is the dead-letter list.\n\nThe ownership join is not optional and not a filter the caller supplies.\n`?profile_id=` narrows within what this user owns; it cannot widen beyond\nit, so passing someone else's id returns an empty list rather than their\njobs. A listing endpoint is the easiest place to leak everything at once,\nbecause one missing predicate returns every row in the table instead of\none.",
+        "operationId": "list_jobs_api_jobs_get",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Profile Id"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/JobResponse"
+                  },
+                  "title": "Response List Jobs Api Jobs Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/jobs/{job_id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Get Job",
+        "description": "Current state of one job. This is the endpoint the frontend polls.\n\nSets `Cache-Control: no-store` because a cached job status is worse than\nuseless -- a proxy holding a `queued` response for 30 seconds makes the\nUI look stuck when the work has already finished.\n\nOwnership is inherited through the profile rather than stored on the job.\nA job belongs to whoever owns the resume it was submitted for, so joining\nkeeps one source of truth; a `user_id` column here could disagree with\n`profiles.user_id` and there would be no way to say which was right.",
+        "operationId": "get_job_api_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/batches": {
+      "post": {
+        "tags": [
+          "batches"
+        ],
+        "summary": "Create Batch",
+        "description": "Accept a URL list and fan it out onto the ingest queue.\n\n202, not 201: nothing has been fetched. The batch row exists and N jobs\nare queued, which is exactly what \"accepted for processing\" means.\n\nParsing happens in the handler rather than in a job. It is line splitting\nand string normalization over an already-uploaded file -- microseconds,\nlocal CPU, no network -- so pushing it onto a queue would add a round\ntrip and a second polling state to save nothing. The expensive part is\nthe N fetches, and those are queued.",
+        "operationId": "create_batch_api_batches_post",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_batch_api_batches_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchCreateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "batches"
+        ],
+        "summary": "List Batches",
+        "description": "This user's batches, newest first.\n\nScoped by ownership before any caller-supplied parameter is applied, so\nthere is no argument that widens the result past what this user owns.",
+        "operationId": "list_batches_api_batches_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BatchStatusResponse"
+                  },
+                  "title": "Response List Batches Api Batches Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/batches/{batch_id}": {
+      "get": {
+        "tags": [
+          "batches"
+        ],
+        "summary": "Get Batch",
+        "description": "Aggregate progress for one batch. This is what the client polls.\n\nOne query for the whole batch. The alternative -- the client polling N\njob endpoints -- turns a 500-item progress view into 250 requests per\nsecond at a 2s interval, which would make the progress display the\nheaviest thing in the system.",
+        "operationId": "get_batch_api_batches__batch_id__get",
+        "parameters": [
+          {
+            "name": "batch_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Batch Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchStatusResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ops/overview": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Overview",
+        "description": "Everything the dashboard polls, in one round trip.\n\nOne endpoint rather than five because the panels are read together and a\ndashboard that fires five requests every two seconds is its own load\nproblem. The cost here is bounded: a handful of Redis reads plus one\ngrouped SQL count.",
+        "operationId": "overview_api_ops_overview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpsOverview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ops/dead-letter": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Dead Letter",
+        "description": "Jobs that exhausted their retries, newest first.\n\nSourced from Postgres rather than RQ's FailedJobRegistry because the row\nis the durable record: it survives the registry's TTL and carries the\nattempt count and the truncated error. The registry is the transport's\nview; `ingest_jobs` is ours.",
+        "operationId": "dead_letter_api_ops_dead_letter_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeadLetterItem"
+                  },
+                  "title": "Response Dead Letter Api Ops Dead Letter Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ops/jobs/{job_id}/requeue": {
+      "post": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Requeue",
+        "description": "Put a failed job back on its queue.\n\nResets `attempts` to zero. A requeue is an operator asserting the cause\nwas fixed, so the job deserves a fresh retry budget rather than\ndead-lettering again on its next tick because the counter was already\nexhausted.",
+        "operationId": "requeue_api_ops_jobs__job_id__requeue_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequeueResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BatchCreateResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "profile_id": {
+            "type": "integer",
+            "title": "Profile Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "accepted": {
+            "type": "integer",
+            "title": "Accepted"
+          },
+          "rejected": {
+            "type": "integer",
+            "title": "Rejected"
+          },
+          "duplicates": {
+            "type": "integer",
+            "title": "Duplicates"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "profile_id",
+          "filename",
+          "accepted",
+          "rejected",
+          "duplicates",
+          "created_at"
+        ],
+        "title": "BatchCreateResponse",
+        "description": "What POST /api/batches returns once a URL list has been accepted.\n\nEvery line the user sent is accounted for: `accepted + rejected +\nduplicates` equals the non-blank line count of their file. A batch that\nquietly ingests 500 of someone's 4,000 lines is worse than one that\nrefuses, because they cannot tell which 3,500 are missing."
+      },
+      "BatchStatusResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "profile_id": {
+            "type": "integer",
+            "title": "Profile Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "rejected": {
+            "type": "integer",
+            "title": "Rejected"
+          },
+          "duplicates": {
+            "type": "integer",
+            "title": "Duplicates"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts"
+          },
+          "is_complete": {
+            "type": "boolean",
+            "title": "Is Complete"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "profile_id",
+          "filename",
+          "total",
+          "rejected",
+          "duplicates",
+          "created_at",
+          "counts",
+          "is_complete"
+        ],
+        "title": "BatchStatusResponse",
+        "description": "Aggregate progress for one batch. The endpoint a client polls.\n\nOne request covers the whole batch rather than N requests for N jobs --\npolling 500 individual job endpoints every two seconds is how a progress\nview becomes the heaviest thing in the system.\n\nThe counts are derived by grouping jobs on `batch_id`, never read from a\nstored counter. See models.UrlBatch for why."
+      },
+      "Body_create_batch_api_batches_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_create_batch_api_batches_post"
+      },
+      "Body_upload_resume_api_profiles_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_resume_api_profiles_post"
+      },
+      "DeadLetterItem": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "url",
+          "status",
+          "attempts",
+          "updated_at"
+        ],
+        "title": "DeadLetterItem"
+      },
+      "ExtractedSkill": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "years": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Years"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "experience",
+                  "project",
+                  "education",
+                  "skills_list",
+                  "unknown"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ExtractedSkill",
+        "description": "A skill as surfaced to clients -- canonical name plus its evidence."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "JobResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "profile_id": {
+            "type": "integer",
+            "title": "Profile Id"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "dead"
+            ],
+            "title": "Status"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "is_terminal": {
+            "type": "boolean",
+            "title": "Is Terminal"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "profile_id",
+          "url",
+          "status",
+          "attempts",
+          "created_at",
+          "updated_at",
+          "is_terminal"
+        ],
+        "title": "JobResponse",
+        "description": "A job's current state. This is what the frontend polls."
+      },
+      "JobSubmitRequest": {
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2083,
+            "minLength": 1,
+            "format": "uri",
+            "title": "Url"
+          },
+          "profile_id": {
+            "type": "integer",
+            "title": "Profile Id"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "url",
+          "profile_id"
+        ],
+        "title": "JobSubmitRequest",
+        "description": "Body of POST /api/jobs.\n\n`HttpUrl` is doing real work here: a malformed URL is rejected with a\nfield-level 422 before any row is written or any job enqueued. Without\nit, the bad value reaches a worker minutes later and fails there, which\nis a far worse place to discover a typo."
+      },
+      "LoginRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "description": "Body of POST /api/auth/login.\n\nNo length constraints. Validating the shape of a *submitted* password\ntells an attacker the policy and rejects legacy passwords that predate a\nrule change; the only question at login is whether it matches."
+      },
+      "OpsOverview": {
+        "properties": {
+          "queues": {
+            "items": {
+              "$ref": "#/components/schemas/QueueHealth"
+            },
+            "type": "array",
+            "title": "Queues"
+          },
+          "workers": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerInfo"
+            },
+            "type": "array",
+            "title": "Workers"
+          },
+          "jobs_by_status": {
+            "items": {
+              "$ref": "#/components/schemas/StatusCount"
+            },
+            "type": "array",
+            "title": "Jobs By Status"
+          },
+          "job_timeout_seconds": {
+            "type": "integer",
+            "title": "Job Timeout Seconds"
+          },
+          "result_ttl_seconds": {
+            "type": "integer",
+            "title": "Result Ttl Seconds"
+          },
+          "failure_ttl_seconds": {
+            "type": "integer",
+            "title": "Failure Ttl Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "queues",
+          "workers",
+          "jobs_by_status",
+          "job_timeout_seconds",
+          "result_ttl_seconds",
+          "failure_ttl_seconds"
+        ],
+        "title": "OpsOverview",
+        "description": "Everything the dashboard polls, in one response."
+      },
+      "ProfileUploadResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "characters": {
+            "type": "integer",
+            "title": "Characters"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "extraction_ok": {
+            "type": "boolean",
+            "title": "Extraction Ok"
+          },
+          "seniority": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "junior",
+                  "mid",
+                  "senior",
+                  "staff",
+                  "unknown"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Seniority"
+          },
+          "years_experience": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Years Experience"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/ExtractedSkill"
+            },
+            "type": "array",
+            "title": "Skills",
+            "default": []
+          },
+          "raw_text": {
+            "type": "string",
+            "title": "Raw Text"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "filename",
+          "characters",
+          "created_at",
+          "extraction_ok",
+          "raw_text"
+        ],
+        "title": "ProfileUploadResponse",
+        "description": "What POST /api/profiles returns once a resume has been stored.\n\nfrom_attributes lets FastAPI build this from a SQLAlchemy Profile object\nby reading attributes rather than requiring a dict.\n\n`extraction_ok` is deliberately explicit. Text extraction and LLM\nextraction fail independently: a resume can parse perfectly and still\ncome back with no structured profile if the provider was down. Rather\nthan failing the upload -- which would discard raw_text we successfully\nparsed -- the row is saved with null extraction and this flag tells the\nclient which happened. A client seeing skills=[] otherwise cannot\ndistinguish \"no skills found\" from \"extraction never ran\"."
+      },
+      "QueueHealth": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "started": {
+            "type": "integer",
+            "title": "Started"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed"
+          },
+          "deferred": {
+            "type": "integer",
+            "title": "Deferred"
+          },
+          "scheduled": {
+            "type": "integer",
+            "title": "Scheduled"
+          },
+          "declared": {
+            "type": "boolean",
+            "title": "Declared"
+          },
+          "worker_count": {
+            "type": "integer",
+            "title": "Worker Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "depth",
+          "started",
+          "failed",
+          "deferred",
+          "scheduled",
+          "declared",
+          "worker_count"
+        ],
+        "title": "QueueHealth",
+        "description": "One queue's depth and the registries around it."
+      },
+      "RegisterRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          },
+          "password": {
+            "type": "string",
+            "maxLength": 1024,
+            "minLength": 12,
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "RegisterRequest",
+        "description": "Body of POST /api/auth/register.\n\n`EmailStr` rejects a malformed address with a field-level 422 before any\nrow is written. The minimum length is deliberately a floor rather than a\ncomposition rule -- no \"must contain a symbol\", because those rules push\npeople toward `Password1!` and measurably reduce entropy compared with\nsimply requiring more characters."
+      },
+      "RequeueResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "queue": {
+            "type": "string",
+            "title": "Queue"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "queue"
+        ],
+        "title": "RequeueResponse"
+      },
+      "StatusCount": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "count"
+        ],
+        "title": "StatusCount"
+      },
+      "UserResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "email": {
+            "type": "string",
+            "title": "Email"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "is_admin": {
+            "type": "boolean",
+            "title": "Is Admin",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "created_at"
+        ],
+        "title": "UserResponse",
+        "description": "A user as returned to clients. Note what is absent: password_hash.\n\nThis is the concrete reason ORM models are not reused as API responses.\nReturning a `User` directly would serialize every column it has, and the\nfirst person to notice would be whoever reads the hash out of the\nresponse body."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "WorkerInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "queues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Queues"
+          },
+          "current_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Job Id"
+          },
+          "successful_jobs": {
+            "type": "integer",
+            "title": "Successful Jobs"
+          },
+          "failed_jobs": {
+            "type": "integer",
+            "title": "Failed Jobs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "state",
+          "queues",
+          "successful_jobs",
+          "failed_jobs"
+        ],
+        "title": "WorkerInfo",
+        "description": "One RQ worker process and the queues it drains."
+      }
+    }
+  }
+}

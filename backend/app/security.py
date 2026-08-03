@@ -218,3 +218,29 @@ def owned_profile(
         raise HTTPException(status_code=404, detail=f"Profile {profile_id} not found")
 
     return profile
+
+
+def require_admin(user: User = Depends(current_user)) -> User:
+    """The authenticated user, if they are an operator. Otherwise 403.
+
+    **403 here, where `owned_profile` returns 404.** The two look like the
+    same decision and are not. Returning 404 for a profile you do not own
+    hides *whether that row exists*, because confirming existence is an
+    enumeration oracle -- walk the ids and learn which are real. No
+    equivalent secret exists here: `/api/ops/overview` is a fixed path
+    published in the OpenAPI document, so a 404 would conceal nothing while
+    telling a legitimate operator their deployment is missing an endpoint
+    when the truth is their account is missing a flag.
+
+    Layered on `current_user`, so an anonymous request still fails at 401
+    before reaching this check. That distinction is the useful part for a
+    client: 401 means "authenticate and retry", 403 means "retrying will not
+    help".
+    """
+    if not user.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="This endpoint requires operator access",
+        )
+
+    return user

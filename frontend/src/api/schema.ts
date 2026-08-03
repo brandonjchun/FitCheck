@@ -730,6 +730,11 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /**
+             * Is Admin
+             * @default false
+             */
+            is_admin: boolean;
         };
         /** ValidationError */
         ValidationError: {
