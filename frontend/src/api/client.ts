@@ -29,6 +29,9 @@ export type Job = components["schemas"]["JobResponse"];
 export type User = components["schemas"]["UserResponse"];
 export type JobStatus = Job["status"];
 
+export type Batch = components["schemas"]["BatchStatusResponse"];
+export type BatchCreated = components["schemas"]["BatchCreateResponse"];
+
 export type OpsOverview = components["schemas"]["OpsOverview"];
 export type QueueHealth = components["schemas"]["QueueHealth"];
 export type WorkerInfo = components["schemas"]["WorkerInfo"];
@@ -119,6 +122,24 @@ export const jobApi = {
 
   list: (params: { profile_id?: number; status?: string; limit?: number } = {}) =>
     api.get<Job[]>("/api/jobs", { params }).then((r) => r.data),
+};
+
+export const batchApi = {
+  /* profile_id rides in the query string, not the form body. The endpoint
+   * declares it as a path-level parameter alongside the multipart file, so
+   * appending it to the FormData would leave it unread and 422. */
+  create: (profileId: number, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return api
+      .post<BatchCreated>("/api/batches", form, { params: { profile_id: profileId } })
+      .then((r) => r.data);
+  },
+
+  get: (id: number) => api.get<Batch>(`/api/batches/${id}`).then((r) => r.data),
+
+  list: (limit = 20) =>
+    api.get<Batch[]>("/api/batches", { params: { limit } }).then((r) => r.data),
 };
 
 export const opsApi = {

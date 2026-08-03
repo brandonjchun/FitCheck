@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState, type DragEvent } from "react"
 import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  batchApi,
   errorMessage,
   jobApi,
   profileApi,
+  type Batch,
   type ExtractedSkill,
   type Job,
   type ProfileSummary,
@@ -402,6 +404,155 @@ function JobPanel({ profileId }: { profileId: number }) {
   );
 }
 
+/* --- Bulk URL upload -------------------------------------------------- */
+
+/* Slower than the job poll. A batch is the walked-away case by definition --
+ * nobody watches 500 fetches tick over -- and one aggregate query every three
+ * seconds is the whole reason this endpoint exists instead of polling N jobs. */
+const BATCH_POLL_MS = 3000;
+
+/** Mirrors settings.max_urls_per_batch. Copy shows it; the server enforces it. */
+const MAX_URLS_PER_BATCH = 500;
+
+function BatchRow({ batch }: { batch: Batch }) {
+  const { data } = useQuery({
+    queryKey: ["batch", batch.id],
+    queryFn: () => batchApi.get(batch.id),
+    initialData: batch,
+    // `is_complete` comes from the API so this does not hardcode which
+    // statuses are terminal and drift when one is added.
+    refetchInterval: (query) => (query.state.data?.is_complete ? false : BATCH_POLL_MS),
+  });
+
+  const current = data ?? batch;
+  const counts = current.counts ?? {};
+  const succeeded = counts.succeeded ?? 0;
+  const failed = counts.failed ?? 0;
+  const dead = counts.dead ?? 0;
+  const inFlight = (counts.queued ?? 0) + (counts.running ?? 0);
+
+  /* Widths off the batch's own `total`, not off the sum of the counts. If a
+   * job row went missing the bar should come up short and show it, rather
+   * than rescaling to look complete. */
+  const pct = (n: number) => (current.total > 0 ? (n / current.total) * 100 : 0);
+
+  return (
+    <li className="batch-row">
+      <div className="batch-top">
+        <span className="batch-name">{current.filename}</span>
+        <span className={`batch-state ${current.is_complete ? "is-done" : "is-running"}`}>
+          {current.is_complete ? "Complete" : `${inFlight} left`}
+        </span>
+      </div>
+
+      <div
+        className="batch-bar"
+        role="img"
+        aria-label={`${succeeded} of ${current.total} fetched, ${failed} retrying, ${dead} dead`}
+      >
+        <span className="seg seg-ok" style={{ width: `${pct(succeeded)}%` }} />
+        <span className="seg seg-warn" style={{ width: `${pct(failed)}%` }} />
+        <span className="seg seg-bad" style={{ width: `${pct(dead)}%` }} />
+      </div>
+
+      <p className="batch-meta">
+        {succeeded} of {current.total} fetched
+        {failed > 0 && ` · ${failed} retrying`}
+        {dead > 0 && ` · ${dead} gave up`}
+      </p>
+
+      {/* Every line the user sent is accounted for. A batch that quietly
+        * ingests 500 of someone's 4,000 lines is worse than one that refuses,
+        * because they cannot tell which 3,500 are missing. */}
+      {(current.rejected > 0 || current.duplicates > 0) && (
+        <p className="batch-note">
+          {current.rejected} unreadable · {current.duplicates} duplicate
+          {current.duplicates === 1 ? "" : "s"} skipped
+        </p>
+      )}
+    </li>
+  );
+}
+
+function BatchPanel({ profileId }: { profileId: number }) {
+  const queryClient = useQueryClient();
+
+  const batches = useQuery({
+    queryKey: ["batches"],
+    queryFn: () => batchApi.list(20),
+  });
+
+  const upload = useMutation({
+    mutationFn: (file: File) => batchApi.create(profileId, file),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["batches"] }),
+  });
+
+  return (
+    <div className="panel card">
+      <div className="panel-head">
+        <div>
+          <h3>Bulk upload</h3>
+          <p className="panel-meta">
+            A .txt file, one posting URL per line, up to {MAX_URLS_PER_BATCH}.
+          </p>
+        </div>
+      </div>
+
+      <div className="batch-upload">
+        <input
+          type="file"
+          accept=".txt,text/plain"
+          id="batch-input"
+          className="sr-only"
+          disabled={upload.isPending}
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) upload.mutate(file);
+            // Cleared so re-picking the same filename still fires change.
+            e.target.value = "";
+          }}
+        />
+        <label htmlFor="batch-input" className="btn btn-ghost">
+          {upload.isPending ? "Uploading…" : "Choose a URL list"}
+        </label>
+        <span className="batch-hint">
+          Bulk lists land on the <code>ingest</code> queue, so they never delay a
+          single submission.
+        </span>
+      </div>
+
+      {upload.isError && (
+        <p className="form-error" role="alert">
+          {errorMessage(upload.error, "That list could not be accepted.")}
+        </p>
+      )}
+
+      {/* The receipt. `accepted + rejected + duplicates` equals the non-blank
+        * line count of their file, which is the contract the endpoint makes. */}
+      {upload.isSuccess && upload.data && (
+        <div className="notice notice-info">
+          <strong>{upload.data.accepted} queued.</strong>{" "}
+          {upload.data.rejected} line{upload.data.rejected === 1 ? "" : "s"} could
+          not be read as a URL, {upload.data.duplicates} already submitted.
+        </div>
+      )}
+
+      {batches.data && batches.data.length > 0 ? (
+        <ul className="batch-list">
+          {batches.data.map((batch) => (
+            <BatchRow key={batch.id} batch={batch} />
+          ))}
+        </ul>
+      ) : (
+        <p className="panel-empty">
+          No lists uploaded yet. Useful when you have a page of postings to
+          check at once rather than one you are looking at right now.
+        </p>
+      )}
+    </div>
+  );
+}
+
 /* --- Resume versions -------------------------------------------------- */
 
 function VersionRow({
@@ -594,7 +745,10 @@ export function Workspace() {
 
           <section aria-label="Job postings">
             {openId != null ? (
-              <JobPanel profileId={openId} />
+              <>
+                <JobPanel profileId={openId} />
+                <BatchPanel profileId={openId} />
+              </>
             ) : (
               <div className="panel card panel-locked">
                 <h3>Job postings</h3>
