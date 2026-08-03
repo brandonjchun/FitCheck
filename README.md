@@ -2,7 +2,7 @@
 
 Resume/job-description matching with async ingestion, explainable scoring, and a content-based recommendation feed.
 
-> **Status:** In active development against [`fitcheck-spec-v2.md`](fitcheck-spec-v2.md). Most of this document describes the *target* architecture. See [Roadmap](#roadmap) for what is actually built today, and [PROJECTLIMITATIONS.md](PROJECTLIMITATIONS.md) for known gaps in what exists.
+> **Status:** In active development against a fixed project specification. Most of this document describes the *target* architecture. See [Roadmap](#roadmap) for what is actually built today, and [Known Limitations](#known-limitations) for the gaps that are by design.
 
 ---
 
@@ -375,7 +375,7 @@ pytest
 
 ## Roadmap
 
-Milestone numbering follows [`fitcheck-spec-v2.md` §10](fitcheck-spec-v2.md). **This differs from the earlier version of the spec** — the old M3 was the queue skeleton and auth did not exist. Work completed under the old numbering carries over; the earlier M3 is now part of M4.
+Milestone numbering follows the project specification. **This differs from the earlier version of the spec** — the old M3 was the queue skeleton and auth did not exist. Work completed under the old numbering carries over; the earlier M3 is now part of M4.
 
 Path A ships first and completely. Path B is built on top of a pipeline that already works.
 
@@ -424,7 +424,7 @@ None of that is M1–M3 rework.
 
 ## Known Limitations
 
-Stated rather than hidden. [PROJECTLIMITATIONS.md](PROJECTLIMITATIONS.md) tracks gaps in the code as it exists; the design-level ones:
+Stated rather than hidden. The design-level ones:
 
 - **No collaborative filtering, and there cannot be.** "Users like you liked this posting" needs an interaction matrix across many users and items. On day one there are zero interactions, and at this scale there will never be enough. Path B is purely content-based, deliberately.
 - **Career changers rank badly.** An embedding reflects what you *have* done, not what you *want* to do — a backend engineer targeting ML roles matches backend postings. Partial mitigation would be embedding the resume concatenated with a stated target role.
