@@ -32,6 +32,8 @@ SKILL_ALIASES: dict[str, str] = {
     "aws": "AWS",
     "amazon web services": "AWS",
     "gcp": "Google Cloud Platform",
+    "google cloud platform": "Google Cloud Platform",
+    "google cloud": "Google Cloud Platform",
     "react": "React",
     "reactjs": "React",
     "react.js": "React",
