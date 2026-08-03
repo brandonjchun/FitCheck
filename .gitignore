@@ -4,6 +4,9 @@ fitcheck-spec-v2.md
 # --- Private working notes: known gaps and deferred decisions ---
 PROJECTLIMITATIONS.md
 
+# --- Private working notes: why the code looks the way it does ---
+DECISIONS.md
+
 # --- Python ---
 .venv/
 venv/
