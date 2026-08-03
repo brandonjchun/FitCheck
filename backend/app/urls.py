@@ -10,7 +10,14 @@ canonical forms, and the count reported back to the user reflects what will
 actually be fetched.
 """
 
+import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+# Matches a URI scheme prefix per RFC 3986. Used to tell "this line already
+# declares a scheme" (http, mailto, javascript, file) from "this is a bare
+# hostname" -- the two need opposite handling, and only the second gets an
+# https:// prepended.
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
 
 # Query parameters that identify a marketing campaign rather than a document.
 # Stripping them is what stops the same posting arriving twice because one
@@ -39,7 +46,7 @@ TRACKING_PARAMS: frozenset[str] = frozenset(
         "referrer",
         "source",
         "trk",
-        "trackingId",
+        "trackingid",
     }
 )
 
@@ -73,9 +80,22 @@ def normalize_url(url: str) -> str | None:
     if not candidate:
         return None
 
-    # A bare "example.com/jobs/1" is a common paste. urlsplit reads it as a
-    # path with no scheme, so assume https rather than discarding it.
-    if "//" not in candidate.split("?", 1)[0]:
+    # Raw whitespace cannot appear in a URL, and its presence is the cheapest
+    # reliable signal that a line is prose rather than a link. Without this
+    # check the bare-host branch below turns "Here are the jobs I found:"
+    # into "https://Here are the jobs I found:", which urlsplit accepts.
+    if any(character.isspace() for character in candidate):
+        return None
+
+    if not _SCHEME_RE.match(candidate):
+        # A bare "example.com/jobs/1" is a common paste, so assume https
+        # rather than discarding it -- but only when the first segment looks
+        # like a hostname. Requiring a dot is what separates that from
+        # "just-words", which would otherwise become a fetch against a
+        # nonexistent host.
+        host_part = candidate.split("/", 1)[0].split("?", 1)[0]
+        if "." not in host_part:
+            return None
         candidate = f"https://{candidate}"
 
     try:
@@ -84,15 +104,25 @@ def normalize_url(url: str) -> str | None:
         return None
 
     scheme = parts.scheme.lower()
-    if scheme not in ALLOWED_SCHEMES or not parts.hostname:
+    if scheme not in ALLOWED_SCHEMES:
         return None
 
-    host = parts.hostname.lower()
-    if parts.port and not (
-        (scheme == "http" and parts.port == 80)
-        or (scheme == "https" and parts.port == 443)
+    try:
+        hostname, port = parts.hostname, parts.port
+    except ValueError:
+        # urlsplit defers parsing the port until the attribute is read, so a
+        # malformed authority like "https://e.com:notaport/" raises here
+        # rather than at split time.
+        return None
+
+    if not hostname:
+        return None
+
+    host = hostname.lower()
+    if port and not (
+        (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
     ):
-        host = f"{host}:{parts.port}"
+        host = f"{host}:{port}"
 
     # keep_blank_values so `?debug` survives as a distinguishing parameter
     # rather than vanishing and merging two different pages.
@@ -104,8 +134,12 @@ def normalize_url(url: str) -> str | None:
         )
     )
 
+    # "/" and "" name the same resource, so they collapse to one form --
+    # otherwise "e.com" and "e.com/" become two rows for one posting.
     path = parts.path
-    if len(path) > 1 and path.endswith("/"):
+    if path == "/":
+        path = ""
+    elif len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
 
     return urlunsplit((scheme, host, path, query, ""))

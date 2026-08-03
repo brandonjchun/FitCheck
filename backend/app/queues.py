@@ -66,12 +66,43 @@ QUEUE_NAMES: tuple[str, ...] = (
 #      fixed-interval retry means all 500 come back at the same instant the
 #      moment it recovers -- knocking it straight back down.
 #
-# Jitter is still missing and now matters more than it did: a batch upload is
-# a failure *cohort* by construction, since a hand-collected URL list is
-# usually concentrated on a few job boards. It lands with the real fetch in
-# M5, before any of this reaches a third-party server.
-RETRY_INTERVALS: list[int] = [10, 60, 300]
+RETRY_BASE_INTERVALS: tuple[int, ...] = (10, 60, 300)
 MAX_RETRIES: int = 3
+
+# Jitter, as a fraction of each interval. Applied per job at enqueue time.
+#
+# Backoff alone spreads retries *in time*; it does nothing to spread them
+# across *jobs*. A batch upload is a failure cohort by construction -- a
+# hand-collected URL list is usually concentrated on a few job boards, so
+# hundreds of jobs hit one host, fail together on a 429, and without jitter
+# come back at the same instant 10 seconds later. That is the thundering herd
+# the backoff was supposed to prevent, merely delayed.
+#
+# +/-20% turns a synchronized spike into a spread. It is the difference
+# between 300 requests in one second and roughly 300 spread over four.
+RETRY_JITTER = 0.2
+
+
+def retry_intervals() -> list[int]:
+    """Backoff schedule for one job, with jitter applied per interval.
+
+    Called once per enqueue rather than computed at import, so two jobs
+    queued in the same millisecond get different schedules -- which is the
+    entire point. A module-level constant would jitter the *schedule* once
+    and then apply that same jittered schedule to every job, reproducing the
+    synchronization it was meant to break.
+    """
+    import random
+
+    return [
+        max(1, round(interval * random.uniform(1 - RETRY_JITTER, 1 + RETRY_JITTER)))
+        for interval in RETRY_BASE_INTERVALS
+    ]
+
+
+# Backwards-compatible name. Prefer retry_intervals() -- this one is a plain
+# list and therefore identical for every job that uses it.
+RETRY_INTERVALS: list[int] = list(RETRY_BASE_INTERVALS)
 
 # Hard ceiling on one attempt. This is the only thing that stops a pathological
 # document or a hung socket from occupying a worker forever -- the failure mode

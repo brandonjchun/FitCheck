@@ -65,6 +65,71 @@ class Settings(BaseSettings):
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
 
+    # --- Outbound fetching (M5) ---
+    # Identify the crawler honestly, with a way to be contacted. Impersonating
+    # a browser to evade detection is the thing that gets a project blocked
+    # and is not defensible in an interview; a real UA means an annoyed site
+    # operator can email rather than firewall.
+    fetch_user_agent: str = (
+        "FitCheckBot/0.1 (+https://github.com/brandonjchun/FitCheck; "
+        "student project; contact via repository issues)"
+    )
+
+    # Split rather than one number. Connect failures should surface fast --
+    # a host that will not accept a TCP connection in 5s is down, and waiting
+    # 20 to learn that wastes a worker slot. Read gets longer because a slow
+    # server is still a working one.
+    fetch_connect_timeout: float = 5.0
+    fetch_read_timeout: float = 20.0
+
+    # Abort a response past this many bytes. Enforced while streaming, not
+    # after: checking Content-Length alone is trivially defeated by a server
+    # that omits it or lies, and by then the bytes are already in memory.
+    # 5 MB is far past any job posting and well short of trouble.
+    fetch_max_bytes: int = 5 * 1024 * 1024
+
+    # Redirects are followed, but not indefinitely -- a redirect loop would
+    # otherwise consume the whole job timeout.
+    fetch_max_redirects: int = 5
+
+    # Per-domain rate limiting, enforced in Redis across every worker process.
+    # In-process limiting is useless here: four workers each politely holding
+    # themselves to 1 rps produce 4 rps at the target, which is how projects
+    # get IP-banned and then blame the code.
+    #
+    # One request per second sustained, with a small burst so a handful of
+    # URLs from the same board do not each wait a full second.
+    fetch_rate_per_second: float = 1.0
+    fetch_rate_burst: int = 3
+
+    # How long a worker will wait for a rate-limit token before giving up and
+    # letting the job retry. Bounded because a worker blocked on a token is a
+    # worker doing nothing -- past this it is better to release the slot and
+    # let backoff reschedule the work.
+    fetch_rate_max_wait_seconds: float = 10.0
+
+    # robots.txt is cached per host for this long. Re-fetching it before each
+    # of 400 postings on one board is both wasteful and rude.
+    robots_cache_seconds: int = 3600
+
+    # --- Batch URL upload (M4) ---
+    # The cap that matters, and it is a count rather than a size. The 2 MB
+    # body limit above bounds *bytes*, and 2 MB of text is roughly 40,000
+    # URLs -- so the upload limit looks like a bound on work and is not one.
+    # Each accepted URL becomes an outbound HTTP request to somebody else's
+    # server, which is what actually needs bounding.
+    #
+    # 500 is chosen to be comfortably larger than a real hand-collected list
+    # and far smaller than a denial-of-service. Lines past it are reported
+    # back as rejected rather than silently dropped.
+    max_urls_per_batch: int = 500
+
+    # How many batches one user may have running at once. Without it the
+    # per-batch cap is trivially bypassed by uploading the same file twenty
+    # times, which is the usual way a per-request limit turns out not to be a
+    # limit at all.
+    max_open_batches_per_user: int = 3
+
     # --- Sessions and auth (M3) ---
     # Signs the session cookie. The signature is not what keeps a session
     # secret -- the session id is 256 bits of randomness and the body lives in

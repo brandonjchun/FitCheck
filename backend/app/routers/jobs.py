@@ -15,8 +15,8 @@ from app.queues import (
     MAX_RETRIES,
     QUEUE_INTERACTIVE,
     RESULT_TTL,
-    RETRY_INTERVALS,
     get_queue,
+    retry_intervals,
 )
 from app.schemas import JobResponse, JobSubmitRequest
 from app.security import current_user
@@ -115,7 +115,7 @@ def submit_job(
         rq_job = get_queue(QUEUE_INTERACTIVE).enqueue(
             "app.workers.tasks.process_job_url",
             job.id,
-            retry=Retry(max=MAX_RETRIES, interval=RETRY_INTERVALS),
+            retry=Retry(max=MAX_RETRIES, interval=retry_intervals()),
             job_timeout=JOB_TIMEOUT,
             result_ttl=RESULT_TTL,
             failure_ttl=FAILURE_TTL,

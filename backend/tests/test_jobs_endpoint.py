@@ -15,7 +15,12 @@ from fastapi.testclient import TestClient
 from app.db import SessionLocal
 from app.main import app
 from app.models import Job, Profile
-from app.queues import QUEUE_INGEST, QUEUE_INTERACTIVE, QUEUE_SCORING
+from app.queues import (
+    QUEUE_INGEST,
+    QUEUE_INTERACTIVE,
+    QUEUE_SCORING,
+    RETRY_BASE_INTERVALS,
+)
 
 
 @dataclass
@@ -162,7 +167,14 @@ class TestSubmitJob:
         assert func == "app.workers.tasks.process_job_url"
         assert kwargs["job_timeout"] == 120
         assert kwargs["retry"].max == 3
-        assert kwargs["retry"].intervals == [10, 60, 300]
+
+        # Asserted as a range, not as exact values -- the intervals carry
+        # +/-20% jitter now, and pinning them to [10, 60, 300] would mean
+        # either deleting the jitter or seeding the RNG in a test that is not
+        # about randomness. The shape is what matters: still exponential,
+        # still close to the base schedule.
+        for actual, base in zip(kwargs["retry"].intervals, RETRY_BASE_INTERVALS):
+            assert 0.8 * base <= actual <= 1.2 * base
 
     def test_malformed_url_rejected_before_any_row_is_written(
         self, client, queue, profile_id

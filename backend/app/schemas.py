@@ -101,6 +101,58 @@ class UserResponse(BaseModel):
     created_at: datetime
 
 
+class BatchCreateResponse(BaseModel):
+    """What POST /api/batches returns once a URL list has been accepted.
+
+    Every line the user sent is accounted for: `accepted + rejected +
+    duplicates` equals the non-blank line count of their file. A batch that
+    quietly ingests 500 of someone's 4,000 lines is worse than one that
+    refuses, because they cannot tell which 3,500 are missing.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    profile_id: int
+    filename: str
+    accepted: int
+    rejected: int
+    duplicates: int
+    created_at: datetime
+
+
+class BatchStatusResponse(BaseModel):
+    """Aggregate progress for one batch. The endpoint a client polls.
+
+    One request covers the whole batch rather than N requests for N jobs --
+    polling 500 individual job endpoints every two seconds is how a progress
+    view becomes the heaviest thing in the system.
+
+    The counts are derived by grouping jobs on `batch_id`, never read from a
+    stored counter. See models.UrlBatch for why.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    profile_id: int
+    filename: str
+    total: int
+    rejected: int
+    duplicates: int
+    created_at: datetime
+
+    # Keyed by job status: queued, running, succeeded, failed, dead. Absent
+    # keys mean zero -- the client sums what it gets rather than assuming a
+    # fixed set, so adding a lifecycle state later is not a breaking change.
+    counts: dict[str, int]
+
+    # True once no job is still queued or running. Lets the client stop
+    # polling without hardcoding which statuses are terminal, the same way
+    # JobResponse.is_terminal does for a single job.
+    is_complete: bool
+
+
 class JobSubmitRequest(BaseModel):
     """Body of POST /api/jobs.
 
