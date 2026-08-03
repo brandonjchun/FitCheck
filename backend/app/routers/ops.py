@@ -20,7 +20,7 @@ no endpoint grants it.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from rq import Queue, Worker
+from rq import Queue, Retry, Worker
 from rq.registry import (
     DeferredJobRegistry,
     FailedJobRegistry,
@@ -35,10 +35,14 @@ from app.models import IngestJob
 from app.queues import (
     FAILURE_TTL,
     JOB_TIMEOUT,
+    MAX_RETRIES,
+    QUEUE_INGEST,
+    QUEUE_INTERACTIVE,
     QUEUE_NAMES,
     RESULT_TTL,
     get_queue,
     get_redis,
+    retry_intervals,
 )
 from app.schemas import (
     DeadLetterItem,
@@ -186,8 +190,17 @@ def requeue(job_id: int, db: Session = Depends(get_db)) -> RequeueResponse:
         # wastes a slot and muddies the audit trail for no gain.
         raise HTTPException(
             status_code=409,
-            detail=f"IngestJob {job_id} is {job.status}; only failed or dead jobs can be requeued",
+            detail=f"Job {job_id} is {job.status}; only failed or dead jobs can be requeued",
         )
+
+    # Back onto the queue it came from, not whichever one is the default.
+    #
+    # A batch job requeued onto `interactive` is the head-of-line failure the
+    # four-queue split exists to prevent, arriving through the back door: an
+    # operator clearing fifty dead batch items would put fifty bulk fetches
+    # ahead of every user submission. The origin is recoverable from the row,
+    # so there is no reason to guess.
+    queue_name = QUEUE_INGEST if job.batch_id is not None else QUEUE_INTERACTIVE
 
     job.status = "queued"
     job.attempts = 0
@@ -196,9 +209,17 @@ def requeue(job_id: int, db: Session = Depends(get_db)) -> RequeueResponse:
 
     # Enqueued after the commit, same ordering as the submit path: a worker
     # must never look up a row whose new state has not been written yet.
-    rq_job = get_queue().enqueue(
+    rq_job = get_queue(queue_name).enqueue(
         "app.workers.tasks.process_job_url",
         job.id,
+        # The retry policy has to be restated here. RQ attaches it to the job
+        # at enqueue time rather than to the function, so a requeue that omits
+        # it produces a job that fails permanently on its first transient
+        # error -- behaving differently from the identical job on its original
+        # submission, which is the kind of difference nobody thinks to look
+        # for. Fresh jitter for the same reason as everywhere else: a bulk
+        # requeue is a cohort aimed at a handful of hosts.
+        retry=Retry(max=MAX_RETRIES, interval=retry_intervals()),
         job_timeout=JOB_TIMEOUT,
         result_ttl=RESULT_TTL,
         failure_ttl=FAILURE_TTL,
