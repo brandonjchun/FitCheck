@@ -4,10 +4,9 @@ Creates the app object, registers routers, and exposes a liveness probe.
 Business logic does not live here -- this module wires things together.
 """
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
-from app.middleware import BodySizeLimitMiddleware, RequestBodyTooLarge
+from app.middleware import BodySizeLimitMiddleware
 from app.routers import profiles
 
 app = FastAPI(
@@ -23,15 +22,12 @@ app = FastAPI(
 app.add_middleware(BodySizeLimitMiddleware)
 
 
-# The middleware's Content-Length pre-check returns 413 on its own. But a
-# client using chunked encoding sends no Content-Length, so the cap is
-# enforced mid-stream by raising from the receive channel -- which surfaces
-# as a 500 unless it is mapped back to a real response here.
-@app.exception_handler(RequestBodyTooLarge)
-async def request_body_too_large(
-    request: Request, exc: RequestBodyTooLarge
-) -> JSONResponse:
-    return JSONResponse(status_code=413, content={"detail": str(exc)})
+# There is deliberately no exception handler for RequestBodyTooLarge here.
+# An earlier version registered one, on the assumption that the exception
+# raised mid-stream would reach it. It does not: FastAPI wraps form parsing
+# in a blanket `except Exception` and rewrites anything it catches as a
+# 400, and every upload this app takes is multipart. The middleware writes
+# the 413 to the send channel itself, so it owns both paths end to end.
 
 
 # Plain `def`, not `async def`. This handler does no I/O, so either would work

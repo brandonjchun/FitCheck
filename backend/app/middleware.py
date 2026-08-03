@@ -30,6 +30,10 @@ class BodySizeLimitMiddleware:
        (chunked transfer encoding) or simply lie about it. So we also count
        what actually arrives and abort once the cap is crossed, rather than
        trusting a number the client supplied.
+
+    Both layers answer 413 from this middleware rather than by raising into
+    the application, because the application does not reliably let the
+    exception through -- see guarded_send.
     """
 
     def __init__(self, app: ASGIApp, max_bytes: int = MAX_UPLOAD_BYTES) -> None:
@@ -56,26 +60,67 @@ class BodySizeLimitMiddleware:
 
         # Layer 2: count what actually arrives.
         received = 0
+        exceeded = False
+        response_started = False
 
         async def counting_receive() -> Message:
-            nonlocal received
+            nonlocal received, exceeded
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > self.max_bytes:
+                    # The flag is what the 413 is actually driven by. Raising
+                    # is only to stop the read immediately -- see below for
+                    # why the exception cannot be relied on by itself.
+                    exceeded = True
                     raise RequestBodyTooLarge(
                         f"Request body exceeded {self.max_bytes} bytes"
                     )
             return message
 
-        await self.app(scope, counting_receive, send)
+        async def guarded_send(message: Message) -> None:
+            # Discard whatever the app decided to answer with once the cap has
+            # been crossed. FastAPI wraps `await request.form()` in a blanket
+            # `except Exception` and turns anything it catches into
+            # `400 "There was an error parsing the body"` -- including the
+            # exception above. Since every upload here is multipart, the raise
+            # alone would never reach the app's exception handler, and an
+            # oversized upload would report as a parse error rather than as
+            # what it is. Dropping that response lets the real 413 be sent.
+            nonlocal response_started
+            if exceeded and not response_started:
+                return
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
 
-    async def _send_413(self, send: Send, declared: int) -> None:
+        try:
+            await self.app(scope, counting_receive, guarded_send)
+        except RequestBodyTooLarge:
+            # Reaches here only when nothing swallowed it -- a handler reading
+            # the raw body rather than a form. Either way the response is
+            # written below, so there is one 413 path instead of two.
+            pass
+
+        if exceeded and not response_started:
+            await self._send_413(send, received)
+
+    async def _send_413(self, send: Send, size: int) -> None:
+        """Write a 413 straight to the send channel.
+
+        Built by hand rather than with a Response class because layer 1 runs
+        before the application exists in this call stack -- there is no
+        request object to build a response against yet.
+
+        `size` is the declared Content-Length on the pre-check path, and the
+        number of bytes counted before aborting on the streaming path. Both
+        tell the client the same useful thing: what it sent was over the cap.
+        """
         body = (
             b'{"detail":"Upload too large. Limit is '
             + str(self.max_bytes).encode()
             + b' bytes, got '
-            + str(declared).encode()
+            + str(size).encode()
             + b'."}'
         )
         await send(
