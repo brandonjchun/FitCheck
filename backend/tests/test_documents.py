@@ -8,6 +8,9 @@ or exception out. No database, no network, no app.
 import pytest
 from conftest import (
     make_docx,
+    make_docx_with_merged_row,
+    make_docx_with_nested_table,
+    make_docx_with_table,
     make_pdf,
     make_scanned_pdf,
     make_zip_without_word_parts,
@@ -112,6 +115,129 @@ class TestDocx:
     def test_pdf_renamed_to_docx(self) -> None:
         with pytest.raises(CorruptDocumentError):
             extract_text(make_pdf("Hello"), "resume.docx")
+
+
+class TestDocxTables:
+    """Table cells are text too.
+
+    A resume that lays its skills section out as a two-column table is a common
+    layout, and `document.paragraphs` does not see inside one. Losing it is
+    silent -- no error, no empty result, just a profile missing the section that
+    matters most to scoring.
+    """
+
+    def test_cell_text_is_extracted(self) -> None:
+        text = extract_text(
+            make_docx_with_table([["Languages", "Python, Go"]]), "resume.docx"
+        )
+
+        assert "Languages" in text
+        assert "Python, Go" in text
+
+    def test_cells_in_a_row_stay_on_one_line(self) -> None:
+        # The label has to stay attached to its values. Split across lines,
+        # "Languages" and "Python, Go" are two unrelated fragments.
+        text = extract_text(
+            make_docx_with_table([["Languages", "Python, Go"]]), "resume.docx"
+        )
+
+        assert "Languages | Python, Go" in text
+
+    def test_rows_are_separate_lines(self) -> None:
+        text = extract_text(
+            make_docx_with_table([["Languages", "Python"], ["Cloud", "AWS"]]),
+            "resume.docx",
+        )
+
+        assert "Languages | Python" in text
+        assert "Cloud | AWS" in text
+
+    def test_table_appears_in_document_order(self) -> None:
+        """The regression that a paragraphs-then-tables implementation passes.
+
+        Reading `document.paragraphs` and `document.tables` separately yields
+        every word, in the wrong sequence. That matters because the extraction
+        prompt infers a skill's `source` from its surroundings -- a skills table
+        hoisted below the education section reads as a bare keyword list.
+        """
+        text = extract_text(
+            make_docx_with_table(
+                [["Languages", "Python"]],
+                before=["EXPERIENCE"],
+                after=["EDUCATION"],
+            ),
+            "resume.docx",
+        )
+
+        assert text.index("EXPERIENCE") < text.index("Languages")
+        assert text.index("Languages") < text.index("EDUCATION")
+
+    def test_empty_cells_do_not_produce_stray_separators(self) -> None:
+        text = extract_text(
+            make_docx_with_table([["Languages", "", "Python"]]), "resume.docx"
+        )
+
+        assert "Languages | Python" in text
+        assert "|  |" not in text
+
+    def test_fully_empty_row_is_dropped(self) -> None:
+        text = extract_text(
+            make_docx_with_table([["Languages", "Python"], ["", ""]]), "resume.docx"
+        )
+
+        assert text == "Languages | Python"
+
+    def test_merged_cell_is_not_repeated(self) -> None:
+        """`row.cells` repeats a merged cell once per column it spans."""
+        text = extract_text(
+            make_docx_with_merged_row("TECHNICAL SKILLS", ["Python", "Go"]),
+            "resume.docx",
+        )
+
+        assert text.count("TECHNICAL SKILLS") == 1
+        assert "Python | Go" in text
+
+    def test_nested_table_is_reached(self) -> None:
+        text = extract_text(
+            make_docx_with_nested_table("Skills", ["Python", "Go"]), "resume.docx"
+        )
+
+        assert "Python" in text
+        assert "Go" in text
+
+    def test_multi_line_cell_falls_back_to_block_per_cell(self) -> None:
+        """A whole-resume layout table must not collapse onto one line per row.
+
+        Some resumes are one invisible table with a column per section. Joining
+        those cells with a separator produces a wall of text, so a row holding
+        any multi-line cell is emitted cell-by-cell instead.
+        """
+        text = extract_text(
+            make_docx_with_table([["Bullet one\nBullet two", "Sidebar"]]),
+            "resume.docx",
+        )
+
+        assert "Bullet one" in text
+        assert "Sidebar" in text
+        assert " | " not in text
+
+    def test_table_only_document_is_not_empty(self) -> None:
+        # The failure this whole class exists for: before tables were walked,
+        # a resume laid out entirely as a table extracted to "" and was
+        # rejected by the endpoint as a scanned document.
+        text = extract_text(
+            make_docx_with_table([["Brandon Chun"], ["Python, Go"]]), "resume.docx"
+        )
+
+        assert text.strip() != ""
+        assert "Brandon Chun" in text
+
+    def test_paragraph_only_document_is_unchanged(self) -> None:
+        # Walking the body in document order must not alter the output for a
+        # document that has no tables at all.
+        assert extract_text(make_docx(["First", "Second"]), "resume.docx") == (
+            "First\n\nSecond"
+        )
 
 
 class TestErrorHierarchy:

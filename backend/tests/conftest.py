@@ -90,6 +90,83 @@ def make_docx(paragraphs: list[str]) -> bytes:
     return buffer.getvalue()
 
 
+def make_docx_with_table(
+    rows: list[list[str]],
+    before: list[str] | None = None,
+    after: list[str] | None = None,
+) -> bytes:
+    """Build a .docx with a table, optionally surrounded by paragraphs.
+
+    `before` and `after` exist to pin document *order*. A table appended to the
+    end of the file cannot distinguish an implementation that walks the body in
+    sequence from one that reads paragraphs and tables separately and
+    concatenates -- both pass. Content on either side of the table is what
+    makes those two behaviours produce different output.
+    """
+    document = docx.Document()
+
+    for text in before or []:
+        document.add_paragraph(text)
+
+    table = document.add_table(rows=len(rows), cols=len(rows[0]))
+    for row_index, row in enumerate(rows):
+        for cell_index, text in enumerate(row):
+            # Cells start life holding one empty paragraph, so assigning .text
+            # replaces it rather than appending a second.
+            table.cell(row_index, cell_index).text = text
+
+    for text in after or []:
+        document.add_paragraph(text)
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def make_docx_with_merged_row(header: str, body: list[str]) -> bytes:
+    """Build a table whose first row is one cell merged across every column.
+
+    The layout a resume uses for a section banner above its columns. python-docx
+    reports a merged cell once per grid column it spans, so this is the fixture
+    that catches an implementation emitting the header N times.
+    """
+    document = docx.Document()
+
+    table = document.add_table(rows=2, cols=len(body))
+    merged = table.cell(0, 0)
+    for column in range(1, len(body)):
+        merged = merged.merge(table.cell(0, column))
+    merged.text = header
+
+    for column, text in enumerate(body):
+        table.cell(1, column).text = text
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def make_docx_with_nested_table(outer: str, inner: list[str]) -> bytes:
+    """Build a table containing another table -- a cell holding a sub-grid.
+
+    Rare in hand-written resumes and routine in ones exported from a template.
+    Either the extractor recurses or the inner content vanishes silently.
+    """
+    document = docx.Document()
+
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = outer
+
+    host = table.cell(0, 1)
+    nested = host.add_table(rows=1, cols=len(inner))
+    for column, text in enumerate(inner):
+        nested.cell(0, column).text = text
+
+    buffer = BytesIO()
+    document.save(buffer)
+    return buffer.getvalue()
+
+
 def make_zip_without_word_parts() -> bytes:
     """A structurally valid zip that is not a Word document.
 

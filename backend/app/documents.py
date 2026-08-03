@@ -4,13 +4,23 @@ Raw text extraction from uploaded resume files.
 Pure functions: bytes in, text out. No database, no network, no framework.
 """
 
+from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
 from zipfile import BadZipFile
 
 import docx
 import pdfplumber
+from docx.oxml.ns import qn
+from docx.table import Table, _Cell
+from docx.text.paragraph import Paragraph
 from pdfplumber.utils.exceptions import PdfminerException
+
+# Cells of one row are joined with this when the whole row fits on one line.
+# A resume skills table -- "Languages | Python, Go" -- only means anything if
+# the label stays attached to its values, and a bare newline between cells
+# breaks exactly that association.
+CELL_SEPARATOR = " | "
 
 
 class DocumentError(Exception):
@@ -105,9 +115,13 @@ def _extract_pdf(file_bytes: bytes) -> str:
 
 def _extract_docx(file_bytes: bytes) -> str:
     """
-    Extract text from DOCX bytes.
+    Extract text from DOCX bytes, including table contents.
 
-    Known Limitation: Won't pull information from tables.
+    Tables are walked in document order alongside paragraphs rather than
+    appended afterwards. Order carries meaning here: the extraction prompt
+    infers a skill's `source` from its surroundings, so a skills table hoisted
+    out of position reads as a bare keyword list even when it sat under a job
+    heading.
 
     Raises:
         CorruptDocumentError: If the bytes cannot be parsed as a DOCX.
@@ -128,11 +142,82 @@ def _extract_docx(file_bytes: bytes) -> str:
             "corrupt, incomplete, or not actually a .docx."
         ) from exc
 
-    paragraph_texts: list[str] = []
+    return "\n\n".join(_extract_blocks(document))
 
-    for paragraph in document.paragraphs:
-        text = paragraph.text
-        if text:
-            paragraph_texts.append(text)
 
-    return "\n\n".join(paragraph_texts)
+def _iter_blocks(parent: object) -> Iterator[Paragraph | Table]:
+    """Yield the paragraphs and tables of `parent` in document order.
+
+    `document.paragraphs` and `document.tables` are each complete and each
+    partial: neither reports where its members sat relative to the other's, so
+    reading both and concatenating produces every word in the wrong order.
+    Walking the underlying XML is the only way to recover the sequence.
+
+    Cell paragraphs are deliberately not double-counted -- `document.paragraphs`
+    returns only direct children of the body, so a paragraph inside a table is
+    reached through the table and nowhere else.
+    """
+    element = parent._tc if isinstance(parent, _Cell) else parent.element.body
+
+    for child in element.iterchildren():
+        # Matching on the qualified tag rather than importing CT_P and CT_Tbl,
+        # which are python-docx internals and have moved between releases.
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, parent)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, parent)
+
+
+def _extract_blocks(parent: object) -> list[str]:
+    """Flatten one container's blocks into text, recursing through tables."""
+    blocks: list[str] = []
+
+    for block in _iter_blocks(parent):
+        if isinstance(block, Paragraph):
+            # Same truthiness test the paragraph-only version used: Word
+            # documents are full of genuinely empty paragraphs used as
+            # spacing, while a whitespace-only one is usually deliberate.
+            if block.text:
+                blocks.append(block.text)
+        else:
+            blocks.extend(_extract_table(block))
+
+    return blocks
+
+
+def _extract_table(table: Table) -> list[str]:
+    """Render one table as a list of row strings.
+
+    Rows whose cells are all single-line are joined with CELL_SEPARATOR, which
+    keeps a two-column skills table readable as pairs. Rows containing a
+    multi-line cell are emitted cell-per-block instead -- some resumes lay the
+    entire document out in one invisible table, and forcing that onto one line
+    per row would produce a wall of text with separators scattered through it.
+    """
+    rows: list[str] = []
+
+    for row in table.rows:
+        cells: list[str] = []
+        # A horizontally merged cell is repeated by `row.cells` once for every
+        # grid column it spans, all backed by the same element. Without this
+        # check a merged section header is emitted two or three times.
+        seen: set[int] = set()
+
+        for cell in row.cells:
+            if id(cell._tc) in seen:
+                continue
+            seen.add(id(cell._tc))
+
+            text = "\n\n".join(_extract_blocks(cell))
+            if text:
+                cells.append(text)
+
+        if not cells:
+            continue
+
+        if any("\n" in cell for cell in cells):
+            rows.extend(cells)
+        else:
+            rows.append(CELL_SEPARATOR.join(cells))
+
+    return rows
