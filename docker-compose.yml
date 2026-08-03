@@ -3,6 +3,12 @@
 # in Linux containers, which is how these run in production -- no
 # Windows-specific builds or ports involved.
 
+# Pin the project name instead of letting Compose derive it from the directory.
+# Derived names follow the folder, so renaming the checkout would change the
+# prefix on every container, network, and volume -- and a renamed `pgdata`
+# volume reads as an empty database rather than an error.
+name: fitcheck
+
 services:
   postgres:
     # pgvector/pgvector rather than the plain postgres image: it is the
