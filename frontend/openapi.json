@@ -440,6 +440,119 @@
           }
         }
       }
+    },
+    "/api/ops/overview": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Overview",
+        "description": "Everything the dashboard polls, in one round trip.\n\nOne endpoint rather than five because the panels are read together and a\ndashboard that fires five requests every two seconds is its own load\nproblem. The cost here is bounded: a handful of Redis reads plus one\ngrouped SQL count.",
+        "operationId": "overview_api_ops_overview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpsOverview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ops/dead-letter": {
+      "get": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Dead Letter",
+        "description": "Jobs that exhausted their retries, newest first.\n\nSourced from Postgres rather than RQ's FailedJobRegistry because the row\nis the durable record: it survives the registry's TTL and carries the\nattempt count and the truncated error. The registry is the transport's\nview; `ingest_jobs` is ours.",
+        "operationId": "dead_letter_api_ops_dead_letter_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DeadLetterItem"
+                  },
+                  "title": "Response Dead Letter Api Ops Dead Letter Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/ops/jobs/{job_id}/requeue": {
+      "post": {
+        "tags": [
+          "ops"
+        ],
+        "summary": "Requeue",
+        "description": "Put a failed job back on its queue.\n\nResets `attempts` to zero. A requeue is an operator asserting the cause\nwas fixed, so the job deserves a fresh retry budget rather than\ndead-lettering again on its next tick because the counter was already\nexhausted.",
+        "operationId": "requeue_api_ops_jobs__job_id__requeue_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequeueResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -457,6 +570,51 @@
           "file"
         ],
         "title": "Body_upload_resume_api_profiles_post"
+      },
+      "DeadLetterItem": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "url",
+          "status",
+          "attempts",
+          "updated_at"
+        ],
+        "title": "DeadLetterItem"
       },
       "ExtractedSkill": {
         "properties": {
@@ -648,6 +806,54 @@
         "title": "LoginRequest",
         "description": "Body of POST /api/auth/login.\n\nNo length constraints. Validating the shape of a *submitted* password\ntells an attacker the policy and rejects legacy passwords that predate a\nrule change; the only question at login is whether it matches."
       },
+      "OpsOverview": {
+        "properties": {
+          "queues": {
+            "items": {
+              "$ref": "#/components/schemas/QueueHealth"
+            },
+            "type": "array",
+            "title": "Queues"
+          },
+          "workers": {
+            "items": {
+              "$ref": "#/components/schemas/WorkerInfo"
+            },
+            "type": "array",
+            "title": "Workers"
+          },
+          "jobs_by_status": {
+            "items": {
+              "$ref": "#/components/schemas/StatusCount"
+            },
+            "type": "array",
+            "title": "Jobs By Status"
+          },
+          "job_timeout_seconds": {
+            "type": "integer",
+            "title": "Job Timeout Seconds"
+          },
+          "result_ttl_seconds": {
+            "type": "integer",
+            "title": "Result Ttl Seconds"
+          },
+          "failure_ttl_seconds": {
+            "type": "integer",
+            "title": "Failure Ttl Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "queues",
+          "workers",
+          "jobs_by_status",
+          "job_timeout_seconds",
+          "result_ttl_seconds",
+          "failure_ttl_seconds"
+        ],
+        "title": "OpsOverview",
+        "description": "Everything the dashboard polls, in one response."
+      },
       "ProfileUploadResponse": {
         "properties": {
           "id": {
@@ -725,6 +931,55 @@
         "title": "ProfileUploadResponse",
         "description": "What POST /api/profiles returns once a resume has been stored.\n\nfrom_attributes lets FastAPI build this from a SQLAlchemy Profile object\nby reading attributes rather than requiring a dict.\n\n`extraction_ok` is deliberately explicit. Text extraction and LLM\nextraction fail independently: a resume can parse perfectly and still\ncome back with no structured profile if the provider was down. Rather\nthan failing the upload -- which would discard raw_text we successfully\nparsed -- the row is saved with null extraction and this flag tells the\nclient which happened. A client seeing skills=[] otherwise cannot\ndistinguish \"no skills found\" from \"extraction never ran\"."
       },
+      "QueueHealth": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "depth": {
+            "type": "integer",
+            "title": "Depth"
+          },
+          "started": {
+            "type": "integer",
+            "title": "Started"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed"
+          },
+          "deferred": {
+            "type": "integer",
+            "title": "Deferred"
+          },
+          "scheduled": {
+            "type": "integer",
+            "title": "Scheduled"
+          },
+          "declared": {
+            "type": "boolean",
+            "title": "Declared"
+          },
+          "worker_count": {
+            "type": "integer",
+            "title": "Worker Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "depth",
+          "started",
+          "failed",
+          "deferred",
+          "scheduled",
+          "declared",
+          "worker_count"
+        ],
+        "title": "QueueHealth",
+        "description": "One queue's depth and the registries around it."
+      },
       "RegisterRequest": {
         "properties": {
           "email": {
@@ -746,6 +1001,47 @@
         ],
         "title": "RegisterRequest",
         "description": "Body of POST /api/auth/register.\n\n`EmailStr` rejects a malformed address with a field-level 422 before any\nrow is written. The minimum length is deliberately a floor rather than a\ncomposition rule -- no \"must contain a symbol\", because those rules push\npeople toward `Password1!` and measurably reduce entropy compared with\nsimply requiring more characters."
+      },
+      "RequeueResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "queue": {
+            "type": "string",
+            "title": "Queue"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "queue"
+        ],
+        "title": "RequeueResponse"
+      },
+      "StatusCount": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "count"
+        ],
+        "title": "StatusCount"
       },
       "UserResponse": {
         "properties": {
@@ -811,6 +1107,54 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WorkerInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "queues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Queues"
+          },
+          "current_job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Job Id"
+          },
+          "successful_jobs": {
+            "type": "integer",
+            "title": "Successful Jobs"
+          },
+          "failed_jobs": {
+            "type": "integer",
+            "title": "Failed Jobs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "state",
+          "queues",
+          "successful_jobs",
+          "failed_jobs"
+        ],
+        "title": "WorkerInfo",
+        "description": "One RQ worker process and the queues it drains."
       }
     }
   }

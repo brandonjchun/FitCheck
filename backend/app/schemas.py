@@ -133,3 +133,72 @@ class JobResponse(BaseModel):
     # terminal. Duplicating that set in the frontend guarantees the two drift
     # the first time a state is added.
     is_terminal: bool
+
+
+# --- Ops dashboard ------------------------------------------------------
+#
+# System-wide views, as opposed to the per-user contracts above. See
+# routers/ops.py for the authorization caveat.
+
+
+class WorkerInfo(BaseModel):
+    """One RQ worker process and the queues it drains."""
+
+    name: str
+    state: str
+    # Ordered, because it is the *priority* order RQ checks them in, not a set.
+    queues: list[str]
+    current_job_id: str | None = None
+    successful_jobs: int
+    failed_jobs: int
+
+
+class QueueHealth(BaseModel):
+    """One queue's depth and the registries around it."""
+
+    name: str
+    depth: int
+    started: int
+    failed: int
+    deferred: int
+    scheduled: int
+
+    # False when the queue exists in Redis but not in QUEUE_NAMES -- work
+    # left behind by a rename, which nothing will ever consume.
+    declared: bool
+    # Zero here alongside a non-zero depth is the stranded-queue signature:
+    # jobs waiting, nobody listening.
+    worker_count: int
+
+
+class StatusCount(BaseModel):
+    status: str
+    count: int
+
+
+class OpsOverview(BaseModel):
+    """Everything the dashboard polls, in one response."""
+
+    queues: list[QueueHealth]
+    workers: list[WorkerInfo]
+    jobs_by_status: list[StatusCount]
+    job_timeout_seconds: int
+    result_ttl_seconds: int
+    failure_ttl_seconds: int
+
+
+class DeadLetterItem(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    url: str
+    status: str
+    attempts: int
+    last_error: str | None = None
+    updated_at: datetime
+
+
+class RequeueResponse(BaseModel):
+    id: int
+    status: str
+    queue: str

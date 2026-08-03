@@ -28,6 +28,11 @@ export type Job = components["schemas"]["JobResponse"];
 export type User = components["schemas"]["UserResponse"];
 export type JobStatus = Job["status"];
 
+export type OpsOverview = components["schemas"]["OpsOverview"];
+export type QueueHealth = components["schemas"]["QueueHealth"];
+export type WorkerInfo = components["schemas"]["WorkerInfo"];
+export type DeadLetterItem = components["schemas"]["DeadLetterItem"];
+
 /**
  * Pull a human-usable message out of an axios error.
  *
@@ -104,4 +109,16 @@ export const jobApi = {
 
   list: (params: { profile_id?: number; status?: string; limit?: number } = {}) =>
     api.get<Job[]>("/api/jobs", { params }).then((r) => r.data),
+};
+
+export const opsApi = {
+  overview: () => api.get<OpsOverview>("/api/ops/overview").then((r) => r.data),
+
+  deadLetter: (limit = 50) =>
+    api
+      .get<DeadLetterItem[]>("/api/ops/dead-letter", { params: { limit } })
+      .then((r) => r.data),
+
+  requeue: (jobId: number) =>
+    api.post(`/api/ops/jobs/${jobId}/requeue`).then((r) => r.data),
 };

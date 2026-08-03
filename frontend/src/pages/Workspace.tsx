@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
 import { Navigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -111,7 +111,8 @@ function ProfilePanel({
   onReset: () => void;
 }) {
   const queryClient = useQueryClient();
-  const [startedAt] = useState(() => Date.now());
+  const [startedAt, setStartedAt] = useState(() => Date.now());
+  const [elapsedMs, setElapsedMs] = useState(0);
 
   const { data, isError, error } = useQuery({
     queryKey: ["profile", profile.id],
@@ -124,15 +125,42 @@ function ProfilePanel({
     },
   });
 
+  const current = data ?? profile;
+
+  /* A ticking clock, not a value derived during render.
+   *
+   * The earlier version computed the timeout as `Date.now() - startedAt >
+   * LIMIT` while rendering. That reads correctly and never fires: once the
+   * poll interval returns false the query stops refetching, so nothing
+   * re-renders this component, so the expression is never evaluated again and
+   * the spinner runs forever. A timeout needs something that actually wakes
+   * up at the boundary.
+   *
+   * It doubles as the elapsed counter. A spinner with no number attached is
+   * indistinguishable from a hang -- which is exactly the confusion that a
+   * job stranded on an orphaned queue produced.
+   */
+  useEffect(() => {
+    if (current.extraction_ok) return;
+    const id = setInterval(() => setElapsedMs(Date.now() - startedAt), 1000);
+    return () => clearInterval(id);
+  }, [current.extraction_ok, startedAt]);
+
   const reextract = useMutation({
     mutationFn: () => profileApi.reextract(profile.id),
-    onSuccess: () =>
-      queryClient.invalidateQueries({ queryKey: ["profile", profile.id] }),
+    onSuccess: () => {
+      // Restarting the clock is what resumes polling: the query only
+      // re-evaluates refetchInterval after a fetch, and invalidate provides
+      // that fetch. Without the reset the fresh attempt would inherit an
+      // already-expired deadline and stop again immediately.
+      setStartedAt(Date.now());
+      setElapsedMs(0);
+      queryClient.invalidateQueries({ queryKey: ["profile", profile.id] });
+    },
   });
 
-  const current = data ?? profile;
-  const timedOut =
-    !current.extraction_ok && Date.now() - startedAt > EXTRACTION_TIMEOUT_MS;
+  const timedOut = !current.extraction_ok && elapsedMs > EXTRACTION_TIMEOUT_MS;
+  const elapsedSeconds = Math.floor(elapsedMs / 1000);
 
   return (
     <div className="panel card">
@@ -158,10 +186,15 @@ function ProfilePanel({
         <div className="working" role="status">
           <span className="spinner" aria-hidden="true" />
           <div>
-            <p className="working-title">Deriving your structured profile</p>
+            <p className="working-title">
+              Deriving your structured profile
+              <span className="elapsed">{elapsedSeconds}s</span>
+            </p>
             <p className="working-sub">
               An LLM is reading the text and validating its output against a
               strict schema. This usually takes 20–60 seconds.
+              {elapsedSeconds > 75 &&
+                " Longer than usual — a local model is slower than a hosted one."}
             </p>
           </div>
         </div>
@@ -170,10 +203,20 @@ function ProfilePanel({
       {timedOut && (
         <div className="notice notice-warn">
           <p>
-            Extraction hasn't come back. The provider may be down, or the
-            document may have no readable text layer — a scanned PDF, for
-            example.
+            <strong>
+              No result after {Math.floor(EXTRACTION_TIMEOUT_MS / 1000)}s.
+            </strong>{" "}
+            Extraction is queued but nothing has come back. The usual causes,
+            in the order worth checking:
           </p>
+          <ul className="notice-list">
+            <li>No worker is consuming the queue this job landed on.</li>
+            <li>The LLM provider is unreachable or rate-limiting.</li>
+            <li>
+              The document has no text layer — a scanned PDF is images, not
+              characters.
+            </li>
+          </ul>
           <button
             className="btn btn-ghost"
             onClick={() => reextract.mutate()}
@@ -181,6 +224,11 @@ function ProfilePanel({
           >
             {reextract.isPending ? "Requeueing…" : "Try extraction again"}
           </button>
+          {reextract.isError && (
+            <p className="form-error" role="alert">
+              {errorMessage(reextract.error, "Could not requeue.")}
+            </p>
+          )}
         </div>
       )}
 

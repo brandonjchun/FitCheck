@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.middleware import BodySizeLimitMiddleware
-from app.routers import auth, jobs, profiles
+from app.routers import auth, jobs, ops, profiles
 
 app = FastAPI(
     title="FitCheck",
@@ -60,3 +60,4 @@ def health() -> dict[str, str]:
 app.include_router(auth.router)
 app.include_router(profiles.router)
 app.include_router(jobs.router)
+app.include_router(ops.router)

@@ -1,0 +1,374 @@
+.dashboard {
+  padding-block: clamp(7rem, 14vh, 9rem) var(--space-9);
+  min-height: 100svh;
+  background: var(--bg-sunken);
+}
+
+.dash-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: var(--space-6);
+}
+
+.dash-title {
+  font-size: var(--step-3);
+  margin-top: var(--space-2);
+}
+
+.dash-meta {
+  font-size: var(--step--1);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.live-tick {
+  color: var(--accent);
+}
+
+.dash-section {
+  margin-top: var(--space-7);
+}
+
+.dash-h2 {
+  font-size: var(--step-1);
+  margin-bottom: var(--space-4);
+}
+
+.dash-empty {
+  font-size: var(--step--1);
+  color: var(--text-muted);
+  padding: var(--space-5);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.dash-footnote {
+  margin-top: var(--space-7);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border);
+  font-size: 0.8rem;
+  color: var(--text-faint);
+}
+
+/* --- Alert ------------------------------------------------------------ */
+
+.alert {
+  padding: var(--space-5);
+  border-radius: var(--radius-lg);
+  background: color-mix(in oklch, var(--danger) 12%, var(--surface));
+  border: 1px solid color-mix(in oklch, var(--danger) 45%, transparent);
+  /* A left rule as well as a fill, so the severity survives a monochrome
+   * screen and does not rest on hue alone. */
+  border-left-width: 4px;
+  margin-bottom: var(--space-6);
+}
+
+.alert strong {
+  display: block;
+  margin-bottom: var(--space-2);
+}
+
+.alert p {
+  font-size: var(--step--1);
+  color: var(--text-muted);
+}
+
+/* --- Tiles ------------------------------------------------------------ */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--space-3);
+}
+
+.tile {
+  padding: var(--space-4);
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: grid;
+  gap: 2px;
+}
+
+.tile-value {
+  font-size: var(--step-2);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.tile-label {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+/* --- Queue cards ------------------------------------------------------ */
+
+.queue-grid {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space-4);
+  grid-template-columns: repeat(auto-fit, minmax(255px, 1fr));
+}
+
+.queue-card {
+  padding: var(--space-5);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border-strong);
+}
+
+.queue-card.tone-bad {
+  border-left-color: var(--danger);
+  background: color-mix(in oklch, var(--danger) 6%, var(--surface));
+}
+.queue-card.tone-warn {
+  border-left-color: var(--warn);
+}
+.queue-card.tone-ok {
+  border-left-color: var(--ok);
+}
+.queue-card.tone-idle {
+  border-left-color: var(--border-strong);
+}
+
+.queue-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.queue-name {
+  font-size: var(--step-0);
+  font-family: var(--font-mono);
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.verdict {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.verdict-bad {
+  color: var(--danger);
+}
+.verdict-warn {
+  color: var(--warn);
+}
+.verdict-ok {
+  color: var(--ok);
+}
+.verdict-idle {
+  color: var(--text-faint);
+}
+
+.queue-depth {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-block: var(--space-3);
+}
+
+.depth-value {
+  font-size: var(--step-3);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.depth-label {
+  font-size: var(--step--1);
+  color: var(--text-muted);
+}
+
+.queue-registries {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  margin: 0;
+}
+
+.queue-registries dt {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.queue-registries dd {
+  margin: 0;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.queue-registries .is-bad {
+  color: var(--danger);
+}
+.queue-registries .is-warn {
+  color: var(--warn);
+}
+
+.queue-detail {
+  margin-top: var(--space-3);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+/* --- Tags ------------------------------------------------------------- */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 0.12rem 0.5rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.tag-bad {
+  background: color-mix(in oklch, var(--danger) 15%, transparent);
+  border-color: color-mix(in oklch, var(--danger) 40%, transparent);
+  color: var(--danger);
+}
+
+.tag-warn {
+  background: color-mix(in oklch, var(--warn) 15%, transparent);
+  border-color: color-mix(in oklch, var(--warn) 40%, transparent);
+}
+
+.tag-arrow {
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+/* --- Workers ---------------------------------------------------------- */
+
+.worker-list,
+.dead-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space-3);
+}
+
+.worker-row {
+  padding: var(--space-4);
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.worker-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.worker-name {
+  font-size: var(--step--1);
+  font-weight: 650;
+}
+
+.worker-state {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.worker-queues {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.worker-stats {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Dead letter ------------------------------------------------------ */
+
+.dead-row {
+  padding: var(--space-4);
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  display: grid;
+  gap: var(--space-2);
+}
+
+.dead-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.dead-url {
+  font-size: var(--step--1);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  flex: 1 1 12rem;
+}
+
+.dead-url:hover {
+  color: var(--accent);
+}
+
+.dead-attempts {
+  font-size: 0.76rem;
+  color: var(--text-faint);
+}
+
+.dead-error {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-sunken);
+  border-radius: var(--radius-sm);
+}
+
+.dead-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.btn-sm {
+  padding: 0.35rem 0.9rem;
+  font-size: var(--step--1);
+}

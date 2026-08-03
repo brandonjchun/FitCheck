@@ -82,6 +82,9 @@ export function Header() {
               <NavLink to="/app" className="btn btn-ghost">
                 Workspace
               </NavLink>
+              <NavLink to="/ops" className="btn btn-ghost">
+                Ops
+              </NavLink>
               <button
                 className="btn btn-ghost"
                 onClick={() => logout.mutate()}

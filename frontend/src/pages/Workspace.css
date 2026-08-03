@@ -120,6 +120,27 @@
 
 .working-title {
   font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+/* Tabular figures so the seconds counter does not shuffle its own width as
+ * digits change -- a jittering number beside a spinner reads as instability. */
+.elapsed {
+  font-family: var(--font-mono);
+  font-size: var(--step--1);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  font-weight: 500;
+}
+
+.notice-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: var(--space-1);
+  color: var(--text-muted);
 }
 
 .working-sub {

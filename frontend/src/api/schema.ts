@@ -274,6 +274,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/ops/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Overview
+         * @description Everything the dashboard polls, in one round trip.
+         *
+         *     One endpoint rather than five because the panels are read together and a
+         *     dashboard that fires five requests every two seconds is its own load
+         *     problem. The cost here is bounded: a handful of Redis reads plus one
+         *     grouped SQL count.
+         */
+        get: operations["overview_api_ops_overview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ops/dead-letter": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Dead Letter
+         * @description Jobs that exhausted their retries, newest first.
+         *
+         *     Sourced from Postgres rather than RQ's FailedJobRegistry because the row
+         *     is the durable record: it survives the registry's TTL and carries the
+         *     attempt count and the truncated error. The registry is the transport's
+         *     view; `ingest_jobs` is ours.
+         */
+        get: operations["dead_letter_api_ops_dead_letter_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/ops/jobs/{job_id}/requeue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Requeue
+         * @description Put a failed job back on its queue.
+         *
+         *     Resets `attempts` to zero. A requeue is an operator asserting the cause
+         *     was fixed, so the job deserves a fresh retry budget rather than
+         *     dead-lettering again on its next tick because the counter was already
+         *     exhausted.
+         */
+        post: operations["requeue_api_ops_jobs__job_id__requeue_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -282,6 +357,24 @@ export interface components {
         Body_upload_resume_api_profiles_post: {
             /** File */
             file: string;
+        };
+        /** DeadLetterItem */
+        DeadLetterItem: {
+            /** Id */
+            id: number;
+            /** Url */
+            url: string;
+            /** Status */
+            status: string;
+            /** Attempts */
+            attempts: number;
+            /** Last Error */
+            last_error?: string | null;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
         };
         /**
          * ExtractedSkill
@@ -373,6 +466,24 @@ export interface components {
             password: string;
         };
         /**
+         * OpsOverview
+         * @description Everything the dashboard polls, in one response.
+         */
+        OpsOverview: {
+            /** Queues */
+            queues: components["schemas"]["QueueHealth"][];
+            /** Workers */
+            workers: components["schemas"]["WorkerInfo"][];
+            /** Jobs By Status */
+            jobs_by_status: components["schemas"]["StatusCount"][];
+            /** Job Timeout Seconds */
+            job_timeout_seconds: number;
+            /** Result Ttl Seconds */
+            result_ttl_seconds: number;
+            /** Failure Ttl Seconds */
+            failure_ttl_seconds: number;
+        };
+        /**
          * ProfileUploadResponse
          * @description What POST /api/profiles returns once a resume has been stored.
          *
@@ -414,6 +525,28 @@ export interface components {
             raw_text: string;
         };
         /**
+         * QueueHealth
+         * @description One queue's depth and the registries around it.
+         */
+        QueueHealth: {
+            /** Name */
+            name: string;
+            /** Depth */
+            depth: number;
+            /** Started */
+            started: number;
+            /** Failed */
+            failed: number;
+            /** Deferred */
+            deferred: number;
+            /** Scheduled */
+            scheduled: number;
+            /** Declared */
+            declared: boolean;
+            /** Worker Count */
+            worker_count: number;
+        };
+        /**
          * RegisterRequest
          * @description Body of POST /api/auth/register.
          *
@@ -431,6 +564,22 @@ export interface components {
             email: string;
             /** Password */
             password: string;
+        };
+        /** RequeueResponse */
+        RequeueResponse: {
+            /** Id */
+            id: number;
+            /** Status */
+            status: string;
+            /** Queue */
+            queue: string;
+        };
+        /** StatusCount */
+        StatusCount: {
+            /** Status */
+            status: string;
+            /** Count */
+            count: number;
         };
         /**
          * UserResponse
@@ -464,6 +613,24 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * WorkerInfo
+         * @description One RQ worker process and the queues it drains.
+         */
+        WorkerInfo: {
+            /** Name */
+            name: string;
+            /** State */
+            state: string;
+            /** Queues */
+            queues: string[];
+            /** Current Job Id */
+            current_job_id?: string | null;
+            /** Successful Jobs */
+            successful_jobs: number;
+            /** Failed Jobs */
+            failed_jobs: number;
         };
     };
     responses: never;
@@ -779,6 +946,88 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    overview_api_ops_overview_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpsOverview"];
+                };
+            };
+        };
+    };
+    dead_letter_api_ops_dead_letter_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeadLetterItem"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    requeue_api_ops_jobs__job_id__requeue_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RequeueResponse"];
                 };
             };
             /** @description Validation Error */
