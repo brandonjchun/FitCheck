@@ -41,6 +41,7 @@ from app.models import (
     hash_url,
 )
 from app.providers import LLMError, LLMPermanentError
+from app.retrieval import FEED_LIMIT, RECALL_LIMIT, recall_candidates
 from app.scoring import (
     SCORER_VERSION,
     blend,
@@ -935,14 +936,219 @@ def _close_missing_postings(source_id: int, crawl_started_at: datetime) -> int:
 
 
 def _enqueue_posting_scoring(posting_id: int) -> None:
-    """Score a newly-ingested catalog posting against active profiles.
+    """Prepare a newly-ingested catalog posting for the recommender.
 
-    Deliberately a no-op for now. M9 owns the fan-out from one posting to
-    every profile that should see it, and doing it here would mean a crawl
-    tick enqueueing (postings x profiles) scoring jobs synchronously -- the
-    exact unbounded fan-out section 6.9 says to schedule rather than trigger.
+    Note what this does *not* do: it does not score the posting against any
+    profile. Fanning a crawl out to (postings x profiles) scoring jobs is
+    section 6.9 option 2, which this project deliberately does not implement
+    -- a 500-posting crawl at 1,000 profiles is 500,000 jobs per tick.
+    Section 6.9 option 1 is the chosen shape, and there the fan-out runs
+    lazily per profile at feed time instead.
+
+    What it does do is make the posting *eligible* to be recommended, which
+    is a prerequisite the crawler otherwise never satisfies: recall orders by
+    `embedding <=> profile_vec`, so a posting with a NULL embedding is
+    invisible to the feed no matter how well it matches. Until this existed,
+    every posting Path B discovered sat unembedded and unextracted forever.
+
+    One job per posting rather than a bulk sweep, because the expensive half
+    is an LLM extraction whose failure should cost one posting rather than a
+    whole crawl's worth -- and because the content-hash gate means a re-crawl
+    only enqueues the ones whose text actually changed.
     """
-    return
+    from app.queues import (
+        FAILURE_TTL,
+        JOB_TIMEOUT,
+        QUEUE_SCORING,
+        RESULT_TTL,
+        get_queue,
+    )
+
+    try:
+        get_queue(QUEUE_SCORING).enqueue(
+            "app.workers.tasks.prepare_posting_task",
+            posting_id,
+            job_timeout=JOB_TIMEOUT,
+            result_ttl=RESULT_TTL,
+            failure_ttl=FAILURE_TTL,
+        )
+    except Exception as exc:
+        # Swallowed for the same reason as _enqueue_scoring: the posting is
+        # committed and durable, so failing here would hand a completed crawl
+        # back to the retry policy and re-request somebody else's server. A
+        # posting left unprepared is recoverable by the backfill sweep.
+        logger.error("could not enqueue preparation for posting=%s: %s", posting_id, exc)
+
+
+def score_profile(profile_id: int, limit: int = FEED_LIMIT) -> str:
+    """Build one profile's recommendation feed: recall, rerank, persist.
+
+    Path B's payoff, and the M9 milestone. Section 8.5's two-stage shape:
+
+        1. Recall ~200 candidates by vector similarity, indexed and approximate.
+        2. Rerank those exactly, on skill overlap, in pure Python.
+        3. Persist the best `limit` as matches with origin='recommendation'.
+
+    **Why this is per-profile and lazy rather than a fan-out from postings.**
+    Section 6.9 ranks three refresh strategies and picks the first: compute a
+    feed when a profile needs one, invalidate on profile change and on a
+    scorer version bump. The property that matters is that cost scales with
+    *active* users rather than registered ones -- a nightly full recompute
+    (option 3) spends the same on an account that has not logged in since
+    March as on one refreshing daily.
+
+    **Why the reranked set is bigger than the persisted set.** 200 in, 50 out.
+    If those were equal, reranking could only confirm the embedding's ordering
+    rather than change it, and the skill half -- the entire explainable part
+    of this system -- would be decorative. The 4x gap is what lets a posting
+    the embedding ranked 180th arrive in the feed because it actually matches
+    the candidate's skills.
+    """
+    _embed_profile(profile_id)
+
+    with _session() as db:
+        profile = db.get(Profile, profile_id)
+        if profile is None:
+            logger.warning("score_profile: profile %s is gone", profile_id)
+            return "profile_missing"
+        if profile.embedding is None:
+            # Not an error worth raising: a profile whose extraction never
+            # succeeded has no vector, so recall has no query point. Returning
+            # rather than scoring keeps the alternative -- a feed built on a
+            # zero semantic score for every posting, which would rank purely
+            # on skills and look like a working feature.
+            logger.warning("score_profile: profile %s has no embedding", profile_id)
+            return "no_embedding"
+
+        profile_vector = list(profile.embedding)
+        profile_skills = profile.skills
+
+        candidates = recall_candidates(db, profile_vector, limit=RECALL_LIMIT)
+        if not candidates:
+            logger.info("score_profile: %s recalled no candidates", profile_id)
+            return "no_candidates"
+
+        # One query for the whole shortlist rather than 200 `db.get` calls.
+        # The rerank is supposed to be the cheap stage; making it N round trips
+        # to Postgres would hand back the advantage recall just bought.
+        postings = {
+            posting.id: posting
+            for posting in db.execute(
+                select(JobPosting).where(
+                    JobPosting.id.in_([c.posting_id for c in candidates])
+                )
+            ).scalars()
+        }
+
+        scored: list[tuple[float, int, float, object, dict]] = []
+        for candidate in candidates:
+            posting = postings.get(candidate.posting_id)
+            if posting is None:
+                # Closed or deleted between recall and this read. Rare, and
+                # skipping is right: a tombstoned posting does not belong in a
+                # feed being built right now.
+                continue
+
+            breakdown = score_skills(posting.skills, profile_skills)
+            final = blend(candidate.semantic_score, breakdown.score)
+            payload = build_breakdown(candidate.semantic_score, breakdown)
+            scored.append(
+                (final, posting.id, candidate.semantic_score, breakdown, payload)
+            )
+
+        scored.sort(key=lambda row: row[0], reverse=True)
+        top = scored[:limit]
+
+        for final, posting_id, semantic, breakdown, payload in top:
+            statement = (
+                pg_insert(Match)
+                .values(
+                    profile_id=profile_id,
+                    job_posting_id=posting_id,
+                    semantic_score=semantic,
+                    skill_score=breakdown.score,
+                    final_score=final,
+                    breakdown=payload,
+                    origin="recommendation",
+                    scorer_version=SCORER_VERSION,
+                )
+                .on_conflict_do_update(
+                    index_elements=["profile_id", "job_posting_id"],
+                    set_={
+                        "semantic_score": semantic,
+                        "skill_score": breakdown.score,
+                        "final_score": final,
+                        "breakdown": payload,
+                        "scorer_version": SCORER_VERSION,
+                        "scored_at": func.now(),
+                    },
+                )
+            )
+            db.execute(statement)
+
+        db.commit()
+
+    # `origin` is deliberately absent from the update set above, so a posting
+    # the user submitted by hand keeps origin='user_submission' even when the
+    # recommender later rescores it. The column records how this pair first
+    # came to be scored, which is a fact about history that a later run has no
+    # standing to rewrite -- and the feed UI uses it to distinguish "you asked
+    # about this" from "we suggested this".
+    logger.info(
+        "score_profile: %s recalled=%d reranked=%d persisted=%d",
+        profile_id,
+        len(candidates),
+        len(scored),
+        len(top),
+    )
+    return "scored"
+
+
+def prepare_posting_task(posting_id: int) -> str:
+    """Extract and embed one catalog posting.
+
+    The public task form of `_prepare_posting`, which until M9 was only ever
+    reached through Path A's scoring. Path B needs the same work done without
+    a profile in the picture, so it gets its own entry point rather than a
+    scoring call with a dummy profile id.
+    """
+    failure = _prepare_posting(posting_id)
+    if failure is not None:
+        logger.warning("prepare_posting_task: %s -> %s", posting_id, failure)
+        return failure
+    return "prepared"
+
+
+def backfill_posting_embeddings(limit: int = 100) -> str:
+    """Prepare catalog postings that predate `_enqueue_posting_scoring`.
+
+    A sweep rather than a migration because the work is an LLM call and a
+    model inference per row, neither of which belongs in a schema migration
+    holding a transaction open.
+
+    Bounded by `limit` and safe to run repeatedly: it selects only rows that
+    still need work, so each pass shrinks the remainder and a failure costs
+    one batch rather than the whole backlog.
+    """
+    with _session() as db:
+        ids = [
+            row[0]
+            for row in db.execute(
+                select(JobPosting.id)
+                .where(
+                    JobPosting.closed_at.is_(None),
+                    JobPosting.embedding.is_(None),
+                )
+                .order_by(JobPosting.id)
+                .limit(limit)
+            ).all()
+        ]
+
+    for posting_id in ids:
+        _enqueue_posting_scoring(posting_id)
+
+    logger.info("backfill_posting_embeddings: enqueued %d postings", len(ids))
+    return f"enqueued {len(ids)}"
 
 
 # --- content-hash gate instrumentation ---------------------------------

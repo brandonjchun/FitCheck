@@ -470,10 +470,13 @@ class JobPosting(Base):
     # -- vectors from different models are coordinates from different maps,
     # and the arithmetic still runs, which is what makes it dangerous.
     #
-    # The HNSW index over this column is M9's, not M7's, and it wants
-    # `WHERE closed_at IS NULL` baked into the index definition so closed
-    # postings are never retrieved rather than filtered afterwards. Building
-    # it now against an empty table would tune it on nothing.
+    # The HNSW index over this column landed at M9, partial on
+    # `closed_at IS NULL` so closed postings are never retrieved rather than
+    # filtered afterwards -- see migration c1e7a92f4d58 for why that
+    # distinction is not cosmetic. Declared in raw SQL there rather than as an
+    # Index() here: the operator class has to be `vector_cosine_ops` to match
+    # the `<=>` the recall query uses, and a mismatch does not error, it
+    # silently falls back to a sequential scan.
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(EMBEDDING_DIM), nullable=True
     )
