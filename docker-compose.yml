@@ -18,10 +18,19 @@ services:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: fitcheck
-      POSTGRES_PASSWORD: devpassword
+      # From the root .env, which is gitignored. `:?` makes Compose refuse to
+      # start rather than silently defaulting, so a missing value is a loud
+      # error instead of a database with a password someone has to guess.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
       POSTGRES_DB: fitcheck
     ports:
-      - "5432:5432"
+      # Bound to loopback, NOT 0.0.0.0. Docker publishes to every interface by
+      # default, and it does so by writing DNAT rules into the DOCKER iptables
+      # chain -- which is traversed before UFW's rules, so `ufw deny 5432`
+      # does not close it. On a host with a public IP the unqualified form
+      # exposes this database to the internet while the firewall reports the
+      # port as blocked. Loopback keeps psql working locally and nothing else.
+      - "127.0.0.1:5432:5432"
     volumes:
       # Named volume, NOT a bind mount. Without this line every
       # `docker compose down` destroys the database.
@@ -36,8 +45,18 @@ services:
 
   redis:
     image: redis:7
+    # Redis has no password by default and is one of the most heavily scanned
+    # ports on the internet. It also holds the session store here, so read
+    # access to it is read access to every logged-in account.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env (see .env.example)}"]
+    environment:
+      # redis-cli reads REDISCLI_AUTH automatically, which keeps the password
+      # out of the healthcheck's argv -- `-a` would put it in `ps` output and
+      # emit a warning on every probe.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?}
     ports:
-      - "6379:6379"
+      # Loopback only, for the same reason as Postgres above.
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -68,7 +87,7 @@ services:
     build:
       context: ./backend
     command: >
-      rq worker --url redis://redis:6379/0
+      rq worker --url redis://:${REDIS_PASSWORD}@redis:6379/0
       interactive scoring ingest
     depends_on:
       # Wait for readiness, not just "container started". Postgres accepts
@@ -91,8 +110,12 @@ services:
       # Service names, not localhost: `postgres` and `redis` resolve to the
       # sibling containers. A worker pointed at localhost would be looking at
       # itself and find nothing listening.
-      DATABASE_URL: postgresql+psycopg://fitcheck:devpassword@postgres:5432/fitcheck
-      REDIS_URL: redis://redis:6379/0
+      # Passwords come from the root .env via Compose substitution, so no
+      # credential is committed. Both are generated with `secrets.token_urlsafe`,
+      # whose alphabet is URL-safe -- so they need no percent-encoding when
+      # embedded in these URLs.
+      DATABASE_URL: postgresql+psycopg://fitcheck:${POSTGRES_PASSWORD}@postgres:5432/fitcheck
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       # Pool sized for this role, not copied from the API tier. A worker runs
       # one job at a time and its tasks open sessions one after another, so
       # the real working set is a single connection; 2 + 2 is slack, not need.
@@ -128,7 +151,7 @@ services:
     # a 2,000-item batch needs to drain faster:
     #   docker compose up -d --scale worker-bulk=4
     command: >
-      rq worker --url redis://redis:6379/0
+      rq worker --url redis://:${REDIS_PASSWORD}@redis:6379/0
       ingest
 
 volumes:

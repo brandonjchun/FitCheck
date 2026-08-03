@@ -7,9 +7,24 @@ DATABASE_URL fails at startup with a clear error rather than on the first
 query.
 """
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/.env, resolved from this file rather than from the working
+# directory.
+#
+# A bare ".env" is CWD-relative, which means the app reads a *different* file
+# depending on where it was launched from: backend/.env under
+# `cd backend && uvicorn ...`, and the repository root's .env under
+# `pytest backend/tests` from the top level. That root file exists and holds
+# the compose credentials (POSTGRES_PASSWORD, REDIS_PASSWORD), which this
+# class does not declare -- so with extra="forbid" the app simply refused to
+# start, and only from some directories.
+#
+# Anchoring to __file__ makes the answer the same everywhere.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
@@ -20,18 +35,41 @@ class Settings(BaseSettings):
     """
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         # Fail loudly if .env contains keys this class does not declare --
         # usually a typo, and silently ignoring it means debugging a setting
         # that "isn't being applied" for an hour.
+        #
+        # Note this only governs the *file* named above. Real environment
+        # variables that happen to share a name with an undeclared field are
+        # ignored rather than rejected, which is what lets the compose stack
+        # export POSTGRES_PASSWORD into a worker container without the worker
+        # refusing to boot.
         extra="forbid",
     )
 
     # postgresql+psycopg:// selects the psycopg 3 driver. The bare
     # postgresql:// prefix means psycopg2, which is not installed.
-    database_url: str = "postgresql+psycopg://fitcheck:devpassword@localhost:5432/fitcheck"
-    redis_url: str = "redis://localhost:6379/0"
+    #
+    # These defaults carry a placeholder rather than a real password on
+    # purpose. A working credential committed here is a credential in every
+    # clone and every fork, and the one that used to live on this line was
+    # also the one protecting the database. Real values come from .env, which
+    # is gitignored; the placeholder fails authentication loudly rather than
+    # letting a misconfigured process quietly reach a database it should not.
+    #
+    # The empty user in the Redis URL is not a typo -- Redis authenticates
+    # with a password and no username unless ACLs are configured.
+    #
+    # 127.0.0.1 rather than localhost, and the difference is two seconds per
+    # connection. Compose publishes these on the IPv4 loopback only, while
+    # `localhost` on Windows resolves to ::1 first -- so every connect tries
+    # IPv6, waits for the refusal, then falls back to IPv4. Measured at 2.05s
+    # via localhost against 0.01s via 127.0.0.1, which across a test suite is
+    # the difference between eight seconds and several minutes.
+    database_url: str = "postgresql+psycopg://fitcheck:SET_IN_DOTENV@127.0.0.1:5432/fitcheck"
+    redis_url: str = "redis://:SET_IN_DOTENV@127.0.0.1:6379/0"
 
     # 2 MB. Enforced by BodySizeLimitMiddleware.
     max_upload_bytes: int = 2 * 1024 * 1024

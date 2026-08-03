@@ -264,9 +264,54 @@ The `pgdata` named volume is not optional — without it, every `docker compose 
 
 ### Configuration
 
-Copy `backend/.env.example` to `backend/.env` and fill it in. It carries the database URL, the Redis URL, and the LLM provider settings (`LLM_PROVIDER`, plus `GEMINI_API_KEY` / `GEMINI_MODEL` or `OLLAMA_MODEL`).
+There are **two** env files, and they are not interchangeable:
 
-Compose only auto-loads a root-level `.env`, so `docker-compose.yml` names `./backend/.env` explicitly and then overrides `DATABASE_URL` and `REDIS_URL` — the host-facing values in `.env` point at `localhost`, which inside the compose network would mean the container itself.
+| File | Read by | Purpose |
+|---|---|---|
+| `.env` (root) | Docker Compose | `POSTGRES_PASSWORD`, `REDIS_PASSWORD` — substituted into `docker-compose.yml` |
+| `backend/.env` | the Python process | `DATABASE_URL`, `REDIS_URL`, LLM provider settings |
+
+Copy both examples and fill them in:
+
+```powershell
+copy .env.example .env
+copy backend\.env.example backend\.env
+```
+
+Generate the two infrastructure passwords with:
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(24))"
+```
+
+The passwords in `backend/.env` must match the ones in the root `.env` — the containers and the host-run process reach the same two services. Both files are gitignored; the `.example` files are committed so a fresh clone knows what is required.
+
+Compose only auto-loads a root-level `.env` for substitution, so `docker-compose.yml` names `./backend/.env` explicitly under `env_file:` and then overrides `DATABASE_URL` and `REDIS_URL` — the host-facing values point at `localhost`, which inside the compose network would mean the container itself.
+
+### A note on the exposed ports
+
+Postgres and Redis are published to `127.0.0.1` rather than the unqualified `5432:5432` form, and Redis runs with `--requirepass`. Both matter the moment this runs anywhere with a public IP:
+
+- Docker publishes to **all interfaces** by default, and it does so by writing DNAT rules into the `DOCKER` iptables chain — which is traversed **before** UFW's rules. `ufw deny 6379` does not close a Docker-published port. The firewall reports it blocked while it is open to the internet.
+- Redis ships with **no password**, is among the most scanned ports on the internet, and here it holds the session store — read access to it is read access to every logged-in account.
+
+If you deploy, prefer removing the `ports:` blocks entirely. The API and workers reach both services by service name on the Compose network and never need host publishing.
+
+### Before deploying to a cloud VM
+
+**Require IMDSv2.** Every major cloud exposes an instance metadata service at `169.254.169.254` that answers only to requests originating on the instance — and returns the instance's IAM role credentials. Because this app fetches user-submitted URLs, that endpoint is reachable via SSRF unless the fetcher validates its targets (see [Known limitations](#known-limitations)).
+
+IMDSv2 requires a `PUT` with a header to obtain a token before any read, which a forged `GET` cannot perform. It closes the highest-value target with one setting:
+
+```bash
+# AWS: enforce on an existing instance
+aws ec2 modify-instance-metadata-options \
+  --instance-id i-xxxxxxxx \
+  --http-tokens required \
+  --http-endpoint enabled
+```
+
+GCP sets `Metadata-Flavor: Google` as a required header by default. DigitalOcean, Hetzner, and Linode expose metadata at the same address with **no** token requirement — on those, blocking egress to `169.254.0.0/16` from the worker is the equivalent control.
 
 ### Backend
 
