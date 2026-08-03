@@ -399,6 +399,60 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/matches": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Matches
+         * @description Matches for one of the caller's profiles, best first.
+         *
+         *     This is the query `matches_feed_idx` exists for -- `(profile_id,
+         *     final_score DESC)` serves both the filter and the ordering, so the
+         *     planner never sorts.
+         *
+         *     Ownership is checked on the *profile* rather than filtered on the
+         *     matches. Filtering alone would return an empty list for someone else's
+         *     profile, which is a subtly worse answer: it says "this profile has no
+         *     matches" where the truth is "this profile is not yours", and a client
+         *     cannot tell an empty feed from a forbidden one.
+         */
+        get: operations["list_matches_api_matches_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/matches/{match_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Match
+         * @description One match with its full skill breakdown.
+         *
+         *     Joined through `profiles` rather than checked afterwards, so a match
+         *     belonging to another user is indistinguishable from one that does not
+         *     exist -- the row never leaves the database.
+         */
+        get: operations["get_match_api_matches__match_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/ops/overview": {
         parameters: {
             query?: never;
@@ -658,6 +712,94 @@ export interface components {
             email: string;
             /** Password */
             password: string;
+        };
+        /** MatchCounts */
+        MatchCounts: {
+            /** Matched */
+            matched: number;
+            /** Partial */
+            partial: number;
+            /** Missing */
+            missing: number;
+            /** Missing Required */
+            missing_required: number;
+        };
+        /**
+         * MatchResponse
+         * @description One scored (profile, posting) pair, with the reasoning attached.
+         *
+         *     Both sub-scores travel with the final one, and the skill breakdown
+         *     travels with both. Spec section 8.4 requires it, and the reason is that
+         *     a blended number alone is unfalsifiable -- 0.35 says nothing a user can
+         *     act on, while "you match 2 of 5 requirements and are short on React
+         *     years" does.
+         */
+        MatchResponse: {
+            /** Id */
+            id: number;
+            /** Profile Id */
+            profile_id: number;
+            /** Job Posting Id */
+            job_posting_id: number;
+            /** Semantic Score */
+            semantic_score: number;
+            /** Skill Score */
+            skill_score: number;
+            /** Final Score */
+            final_score: number;
+            /** Origin */
+            origin: string;
+            /** Scorer Version */
+            scorer_version: number;
+            /**
+             * Scored At
+             * Format: date-time
+             */
+            scored_at: string;
+            counts: components["schemas"]["MatchCounts"];
+            /** Skills */
+            skills: components["schemas"]["MatchSkill"][];
+            /** Weights */
+            weights: {
+                [key: string]: number;
+            };
+            /** Extraction Failed */
+            extraction_failed: boolean;
+            /** Posting Url */
+            posting_url?: string | null;
+            /** Posting Title */
+            posting_title?: string | null;
+            /** Posting Company */
+            posting_company?: string | null;
+        };
+        /**
+         * MatchSkill
+         * @description One posting requirement, judged against the candidate.
+         *
+         *     The unit the UI renders as a green / amber / red row. `bucket` carries
+         *     the verdict and `evidence` carries the posting's own words for it, so a
+         *     user can see what the score was reacting to rather than being told a
+         *     number.
+         */
+        MatchSkill: {
+            /** Name */
+            name: string;
+            /**
+             * Necessity
+             * @enum {string}
+             */
+            necessity: "required" | "preferred" | "unknown";
+            /**
+             * Bucket
+             * @enum {string}
+             */
+            bucket: "matched" | "partial" | "missing";
+            /** Required Years */
+            required_years?: number | null;
+            /** Candidate Years */
+            candidate_years?: number | null;
+            /** Evidence */
+            evidence?: string | null;
         };
         /**
          * OpsOverview
@@ -1364,6 +1506,69 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BatchStatusResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_matches_api_matches_get: {
+        parameters: {
+            query: {
+                profile_id: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MatchResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_match_api_matches__match_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                match_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MatchResponse"];
                 };
             };
             /** @description Validation Error */

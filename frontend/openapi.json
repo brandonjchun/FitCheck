@@ -684,6 +684,108 @@
         }
       }
     },
+    "/api/matches": {
+      "get": {
+        "tags": [
+          "matches"
+        ],
+        "summary": "List Matches",
+        "description": "Matches for one of the caller's profiles, best first.\n\nThis is the query `matches_feed_idx` exists for -- `(profile_id,\nfinal_score DESC)` serves both the filter and the ordering, so the\nplanner never sorts.\n\nOwnership is checked on the *profile* rather than filtered on the\nmatches. Filtering alone would return an empty list for someone else's\nprofile, which is a subtly worse answer: it says \"this profile has no\nmatches\" where the truth is \"this profile is not yours\", and a client\ncannot tell an empty feed from a forbidden one.",
+        "operationId": "list_matches_api_matches_get",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Profile Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 25,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MatchResponse"
+                  },
+                  "title": "Response List Matches Api Matches Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/matches/{match_id}": {
+      "get": {
+        "tags": [
+          "matches"
+        ],
+        "summary": "Get Match",
+        "description": "One match with its full skill breakdown.\n\nJoined through `profiles` rather than checked afterwards, so a match\nbelonging to another user is indistinguishable from one that does not\nexist -- the row never leaves the database.",
+        "operationId": "get_match_api_matches__match_id__get",
+        "parameters": [
+          {
+            "name": "match_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Match Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/ops/overview": {
       "get": {
         "tags": [
@@ -1165,6 +1267,214 @@
         ],
         "title": "LoginRequest",
         "description": "Body of POST /api/auth/login.\n\nNo length constraints. Validating the shape of a *submitted* password\ntells an attacker the policy and rejects legacy passwords that predate a\nrule change; the only question at login is whether it matches."
+      },
+      "MatchCounts": {
+        "properties": {
+          "matched": {
+            "type": "integer",
+            "title": "Matched"
+          },
+          "partial": {
+            "type": "integer",
+            "title": "Partial"
+          },
+          "missing": {
+            "type": "integer",
+            "title": "Missing"
+          },
+          "missing_required": {
+            "type": "integer",
+            "title": "Missing Required"
+          }
+        },
+        "type": "object",
+        "required": [
+          "matched",
+          "partial",
+          "missing",
+          "missing_required"
+        ],
+        "title": "MatchCounts"
+      },
+      "MatchResponse": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "profile_id": {
+            "type": "integer",
+            "title": "Profile Id"
+          },
+          "job_posting_id": {
+            "type": "integer",
+            "title": "Job Posting Id"
+          },
+          "semantic_score": {
+            "type": "number",
+            "title": "Semantic Score"
+          },
+          "skill_score": {
+            "type": "number",
+            "title": "Skill Score"
+          },
+          "final_score": {
+            "type": "number",
+            "title": "Final Score"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "scorer_version": {
+            "type": "integer",
+            "title": "Scorer Version"
+          },
+          "scored_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Scored At"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/MatchCounts"
+          },
+          "skills": {
+            "items": {
+              "$ref": "#/components/schemas/MatchSkill"
+            },
+            "type": "array",
+            "title": "Skills"
+          },
+          "weights": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Weights"
+          },
+          "extraction_failed": {
+            "type": "boolean",
+            "title": "Extraction Failed"
+          },
+          "posting_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Url"
+          },
+          "posting_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Title"
+          },
+          "posting_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Company"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "profile_id",
+          "job_posting_id",
+          "semantic_score",
+          "skill_score",
+          "final_score",
+          "origin",
+          "scorer_version",
+          "scored_at",
+          "counts",
+          "skills",
+          "weights",
+          "extraction_failed"
+        ],
+        "title": "MatchResponse",
+        "description": "One scored (profile, posting) pair, with the reasoning attached.\n\nBoth sub-scores travel with the final one, and the skill breakdown\ntravels with both. Spec section 8.4 requires it, and the reason is that\na blended number alone is unfalsifiable -- 0.35 says nothing a user can\nact on, while \"you match 2 of 5 requirements and are short on React\nyears\" does."
+      },
+      "MatchSkill": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "necessity": {
+            "type": "string",
+            "enum": [
+              "required",
+              "preferred",
+              "unknown"
+            ],
+            "title": "Necessity"
+          },
+          "bucket": {
+            "type": "string",
+            "enum": [
+              "matched",
+              "partial",
+              "missing"
+            ],
+            "title": "Bucket"
+          },
+          "required_years": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required Years"
+          },
+          "candidate_years": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Years"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "necessity",
+          "bucket"
+        ],
+        "title": "MatchSkill",
+        "description": "One posting requirement, judged against the candidate.\n\nThe unit the UI renders as a green / amber / red row. `bucket` carries\nthe verdict and `evidence` carries the posting's own words for it, so a\nuser can see what the score was reacting to rather than being told a\nnumber."
       },
       "OpsOverview": {
         "properties": {

@@ -468,6 +468,10 @@
   background: color-mix(in oklch, var(--danger) 12%, transparent);
 }
 
+.workspace-matches {
+  margin-top: var(--space-5);
+}
+
 /* --- Bulk URL upload -------------------------------------------------- */
 
 /* Each column may now hold more than one card. */

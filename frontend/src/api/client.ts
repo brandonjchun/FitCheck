@@ -32,6 +32,10 @@ export type JobStatus = Job["status"];
 export type Batch = components["schemas"]["BatchStatusResponse"];
 export type BatchCreated = components["schemas"]["BatchCreateResponse"];
 
+export type Match = components["schemas"]["MatchResponse"];
+export type MatchSkill = components["schemas"]["MatchSkill"];
+export type SkillBucket = MatchSkill["bucket"];
+
 export type OpsOverview = components["schemas"]["OpsOverview"];
 export type QueueHealth = components["schemas"]["QueueHealth"];
 export type WorkerInfo = components["schemas"]["WorkerInfo"];
@@ -140,6 +144,18 @@ export const batchApi = {
 
   list: (limit = 20) =>
     api.get<Batch[]>("/api/batches", { params: { limit } }).then((r) => r.data),
+};
+
+export const matchApi = {
+  /* Keyed on the profile, not the job. A match is a (profile, posting) pair,
+   * so the same posting scored against two of your resumes is two matches --
+   * which is the point of keeping several versions around. */
+  list: (profileId: number, limit = 25) =>
+    api
+      .get<Match[]>("/api/matches", { params: { profile_id: profileId, limit } })
+      .then((r) => r.data),
+
+  get: (id: number) => api.get<Match>(`/api/matches/${id}`).then((r) => r.data),
 };
 
 export const opsApi = {

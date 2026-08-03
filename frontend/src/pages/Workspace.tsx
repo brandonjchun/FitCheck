@@ -11,6 +11,7 @@ import {
   type Job,
   type ProfileSummary,
 } from "../api/client";
+import { MatchFeed } from "../components/MatchFeed";
 import { useMe } from "../hooks/useAuth";
 import "./Workspace.css";
 
@@ -760,6 +761,15 @@ export function Workspace() {
             )}
           </section>
         </div>
+
+        {/* Full width, below the grid. This is the output the rest of the page
+          * exists to produce, and the skill breakdown needs horizontal room
+          * that a half-width column does not have. */}
+        {openId != null && (
+          <section aria-label="Matches" className="workspace-matches">
+            <MatchFeed profileId={openId} />
+          </section>
+        )}
       </div>
     </main>
   );
