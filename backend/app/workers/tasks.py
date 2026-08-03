@@ -106,12 +106,17 @@ def extract_profile_task(profile_id: int) -> str:
 def process_job_url(job_id: int) -> str:
     """Process one submitted job-posting URL.
 
-    M3 SKELETON. The state machine, the attempt counter, and the error
-    classification are real; the fetch is not. M4 replaces the placeholder
+    M4 SKELETON. The state machine, the attempt counter, and the error
+    classification are real; the fetch is not. M5 replaces the placeholder
     with an actual HTTP request plus robots.txt, per-domain rate limiting,
     size caps, and timeouts.
 
-    The lifecycle this drives (spec section 6.3):
+    That the fetch is still a no-op is what makes the M4 batch upload safe:
+    a 500-URL list exercises the queues and the fan-out without generating a
+    single outbound request. The token bucket has to land with the real fetch
+    in M5, before the same upload becomes 500 live HTTP calls.
+
+    The lifecycle this drives (spec section 6.4):
 
         queued -> running -> succeeded
                           -> (retry, attempts < max) -> queued
@@ -124,7 +129,7 @@ def process_job_url(job_id: int) -> str:
             return "job_missing"
 
         # Idempotency guard. A redelivered job that already succeeded must
-        # not re-run: at M4 that would mean a second HTTP request to someone
+        # not re-run: at M5 that would mean a second HTTP request to someone
         # else's server, which is exactly the behaviour robots.txt compliance
         # is supposed to prevent.
         if job.status == "succeeded":
@@ -141,9 +146,9 @@ def process_job_url(job_id: int) -> str:
     logger.info("process_job_url: job %s attempt %s -> %s", job_id, attempts, url)
 
     try:
-        # --- M4 replaces this block with a real fetch + parse ---------------
+        # --- M5 replaces this block with a real fetch + parse ---------------
         # Deliberately does nothing rather than pretending to. A fake result
-        # row here would make the M4 diff look like a refactor instead of the
+        # row here would make the M5 diff look like a refactor instead of the
         # feature it is, and would make this milestone's tests pass for the
         # wrong reason.
         result = "fetch_not_implemented"
@@ -168,8 +173,8 @@ def process_job_url(job_id: int) -> str:
 def _record_failure(job_id: int, exc: Exception) -> None:
     """Write a failed attempt back to the job row.
 
-    Sets `dead` once retries are exhausted so the dead-letter list in M8 is a
-    plain query rather than a join against RQ's registries.
+    Sets `dead` once retries are exhausted so the dead-letter list in the M10
+    ops dashboard is a plain query rather than a join against RQ's registries.
     """
     from app.queue import MAX_RETRIES
 
@@ -186,7 +191,7 @@ def _record_failure(job_id: int, exc: Exception) -> None:
 def _is_retryable(exc: Exception) -> bool:
     """Whether a failure is worth another attempt.
 
-    Kept for M4/M5, where fetch errors get classified the same way LLM errors
+    Kept for M5/M6, where fetch errors get classified the same way LLM errors
     already are: a 404 will never succeed and retrying it three times wastes
     two minutes and a worker slot, while a 429 or a timeout usually will.
     """

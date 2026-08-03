@@ -30,7 +30,7 @@ class LLMError(Exception):
 class LLMTransientError(LLMError):
     """Worth retrying: timeout, rate limit, 5xx, connection reset.
 
-    In M5 this is what earns a job an exponential-backoff retry.
+    In M6 this is what earns a job an exponential-backoff retry.
     """
 
 

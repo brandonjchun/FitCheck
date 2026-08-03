@@ -1,7 +1,7 @@
 """Canonical skill names.
 
 The spec calls this "unglamorous and load-bearing" and it is right. Every
-scoring number in M6 depends on it: if a resume says "JS" and a job posting
+scoring number in M7 depends on it: if a resume says "JS" and a job posting
 says "JavaScript", an un-normalized overlap check scores that as a miss, and
 the candidate is silently penalized for a synonym.
 
@@ -58,7 +58,7 @@ def normalize_skill(name: str) -> str:
 
     Lookup is case- and whitespace-insensitive; the returned value keeps the
     map's canonical casing, because this string becomes a comparison key in
-    M6 and "javascript" != "JavaScript".
+    M7 and "javascript" != "JavaScript".
 
     An unrecognised skill is returned stripped but otherwise unchanged rather
     than dropped -- the alias map will never be complete, and silently
@@ -73,7 +73,7 @@ def normalize_skill(name: str) -> str:
     stays distinct from "React", "AWS Lambda" from "AWS"). Those are
     different competencies, and merging them would let a candidate match a
     requirement they do not meet -- exactly the false positive the skill
-    breakdown in M7 exists to make visible.
+    breakdown in M10 exists to make visible.
     """
     cleaned = name.strip()
     return SKILL_ALIASES.get(cleaned.lower(), cleaned)

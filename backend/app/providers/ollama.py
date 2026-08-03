@@ -47,7 +47,7 @@ def _classify(exc: Exception) -> LLMTransientError | LLMPermanentError:
     The interesting call is "connection refused". It is classified as
     TRANSIENT, which is the opposite of how the same error would be treated
     against a hosted API. The reasoning: Ollama is a local daemon under the
-    operator's control, and the retry does not fire immediately -- M5 backs
+    operator's control, and the retry does not fire immediately -- M6 backs
     off to 10s, 60s, then 300s. A daemon that was down when the job was
     picked up is plausibly back up five minutes later, whether because it
     restarted or because someone launched it. Failing permanently would

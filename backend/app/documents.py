@@ -21,7 +21,7 @@ class DocumentError(Exception):
     pdfplumber or zipfile to know what a bad upload looks like. Anything that
     is not a DocumentError is a bug in our code and should surface as a 500.
 
-    This is the same error-classification idea the queue uses in M5, where
+    This is the same error-classification idea the queue uses in M6, where
     failures split into "retry this" and "never retry this" -- classify by
     what the caller should *do*, not by where the error happened.
     """

@@ -128,7 +128,7 @@ def list_jobs(
 ) -> list[Job]:
     """List jobs, newest first. Filterable by profile and status.
 
-    Both filters hit indexed columns. This is the query the M8 ops dashboard
+    Both filters hit indexed columns. This is the query the M10 ops dashboard
     is built on -- `?status=dead` is the dead-letter list.
     """
     query = select(Job).order_by(Job.created_at.desc()).limit(min(limit, 200))

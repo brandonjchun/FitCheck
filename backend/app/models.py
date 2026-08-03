@@ -56,7 +56,7 @@ class Profile(Base):
         Numeric(4, 1), nullable=True
     )
 
-    # embedding: vector(384) is added at M6, together with the pgvector
+    # embedding: vector(384) is added at M7, together with the pgvector
     # SQLAlchemy type. The extension is available in the image already.
 
     # server_default means Postgres fills this in, not Python -- so rows
@@ -93,7 +93,7 @@ class Profile(Base):
         Reads out of JSONB rather than a promoted column: skills are a list
         we display but never filter or join on, so denormalizing them into
         their own table would add a join for no query benefit. That changes
-        at M6, when scoring needs set operations over them.
+        at M7, when scoring needs set operations over them.
         """
         if not self.extracted:
             return []
@@ -132,7 +132,7 @@ class Job(Base):
     most of the time, and would make "show me everything that failed" a query
     against a table that is conceptually about postings.
 
-    This separation is also why the ops dashboard in M8 is cheap to build:
+    This separation is also why the ops dashboard in M10 is cheap to build:
     this table IS the audit log.
     """
 
