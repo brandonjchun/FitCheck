@@ -37,8 +37,16 @@ class Settings(BaseSettings):
     max_upload_bytes: int = 2 * 1024 * 1024
 
     # Connection pool sizing. Postgres defaults to max_connections = 100, and
-    # every API process and worker process holds its own pool. 5 + 5 overflow
-    # per process leaves room for several workers alongside the API tier.
+    # every API process and worker process holds its own pool, so the ceiling
+    # is (processes x (pool_size + max_overflow)) -- not one number.
+    #
+    # These defaults are sized for the API tier, which serves many concurrent
+    # requests per process and genuinely wants headroom. Workers do not: each
+    # one runs a single job at a time, and app.workers.tasks opens its
+    # sessions sequentially rather than concurrently, so one connection is
+    # usually the true working set. docker-compose.yml overrides both values
+    # down for the worker service -- scaling workers is meant to add capacity,
+    # not to march toward max_connections.
     db_pool_size: int = 5
     db_max_overflow: int = 5
 

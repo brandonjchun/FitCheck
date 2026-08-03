@@ -73,6 +73,17 @@ services:
       # itself and find nothing listening.
       DATABASE_URL: postgresql+psycopg://fitcheck:devpassword@postgres:5432/fitcheck
       REDIS_URL: redis://redis:6379/0
+      # Pool sized for this role, not copied from the API tier. A worker runs
+      # one job at a time and its tasks open sessions one after another, so
+      # the real working set is a single connection; 2 + 2 is slack, not need.
+      #
+      # This matters because the ceiling is per process. The API default of
+      # 5 + 5 applied here would mean 10 connections per worker, so
+      # `--scale worker=8` alone reserves 80 of Postgres's default 100 and the
+      # next connection -- from the API, or from psql -- is refused. At 2 + 2
+      # the same scale costs 32 and leaves room to actually debug it.
+      DB_POOL_SIZE: 2
+      DB_MAX_OVERFLOW: 2
       # Ollama runs on the Windows host, not in this container.
       # host.docker.internal is how a container reaches back out to it.
       OLLAMA_HOST: http://host.docker.internal:11434
