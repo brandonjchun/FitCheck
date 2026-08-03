@@ -7,6 +7,8 @@ DATABASE_URL fails at startup with a clear error rather than on the first
 query.
 """
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +41,21 @@ class Settings(BaseSettings):
     # per process leaves room for several workers alongside the API tier.
     db_pool_size: int = 5
     db_max_overflow: int = 5
+
+    # --- LLM extraction (M2) ---
+    # Which provider backs structured extraction. Both are implemented; this
+    # decides which one get_provider() returns. Flip it in .env, restart, done
+    # -- no code change, which is the point of the abstraction.
+    llm_provider: Literal["gemini", "ollama"] = "gemini"
+
+    # Gemini: free tier key from aistudio.google.com. Optional so the app can
+    # start on the ollama path without one.
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.6-flash"
+
+    # Ollama: local daemon, no key. Default host is the standard local port.
+    ollama_host: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1"
 
 
 # Imported as `from app.config import settings` -- constructed once at import

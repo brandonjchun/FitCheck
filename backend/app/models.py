@@ -56,5 +56,27 @@ class Profile(Base):
         """Derived, not stored -- it is len(raw_text) and would go stale."""
         return len(self.raw_text)
 
+    @property
+    def extraction_ok(self) -> bool:
+        """Whether structured extraction ran successfully for this profile.
+
+        Distinguishes "the LLM found no skills" from "the LLM never ran",
+        which an empty skills list alone cannot.
+        """
+        return self.extracted is not None
+
+    @property
+    def skills(self) -> list[dict]:
+        """Skills from the extraction blob, for the API response.
+
+        Reads out of JSONB rather than a promoted column: skills are a list
+        we display but never filter or join on, so denormalizing them into
+        their own table would add a join for no query benefit. That changes
+        at M6, when scoring needs set operations over them.
+        """
+        if not self.extracted:
+            return []
+        return self.extracted.get("skills", [])
+
     def __repr__(self) -> str:
         return f"<Profile id={self.id} file={self.original_filename!r}>"
