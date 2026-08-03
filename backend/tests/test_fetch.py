@@ -9,9 +9,12 @@ The classification tests are the ones that matter most. "Retry this" versus
 three, and it is 20% of the grade under correctness-under-failure.
 """
 
+import socket
+
 import httpx
 import pytest
 
+from app import netguard
 from app.config import settings
 from app.ratelimit import RateLimiter, domain_of
 from app.workers import fetch as fetch_module
@@ -22,6 +25,10 @@ from app.workers.fetch import (
     fetch_posting_text,
     html_to_text,
 )
+
+# A real routable address, used so the SSRF guard sees a public host for the
+# tests that are not about the SSRF guard.
+PUBLIC_IP = "93.184.216.34"
 
 POSTING_URL = "https://boards.example.com/jobs/123"
 
@@ -48,6 +55,30 @@ class AllowAllLimiter:
 
     def acquire(self, host, max_wait=None):
         return True
+
+
+@pytest.fixture(autouse=True)
+def resolves_to(monkeypatch):
+    """Point every hostname at a public address unless a test says otherwise.
+
+    Autouse because `boards.example.com` does not resolve, and without this
+    the SSRF guard would fail every fetch test with a DNS error -- turning
+    tests about size caps and redirects into tests about name resolution.
+
+    Returns an installer so the SSRF tests can aim a hostname wherever they
+    need it, including at nothing.
+    """
+
+    def install(*addresses: str, error: str | None = None):
+        def fake_resolve(host: str, port: int) -> list[str]:
+            if error is not None:
+                raise socket.gaierror(error)
+            return list(addresses)
+
+        monkeypatch.setattr(netguard, "resolve_host", fake_resolve)
+
+    install(PUBLIC_IP)
+    return install
 
 
 @pytest.fixture
@@ -303,6 +334,114 @@ class TestContentGuards:
         assert "Senior Engineer" in fetch_posting_text(
             POSTING_URL, limiter=AllowAllLimiter()
         )
+
+
+class TestSSRFGuard:
+    """The guard as the fetch path actually uses it.
+
+    `test_netguard.py` owns which addresses are refused. These are about
+    *where* the check sits, which is the part that a correct-looking
+    implementation gets wrong: after robots, or before redirects.
+    """
+
+    def test_metadata_address_is_permanent(self, serve, robots, resolves_to) -> None:
+        resolves_to("169.254.169.254")
+        serve(_ok())
+
+        with pytest.raises(PermanentFetchError, match="link-local"):
+            fetch_posting_text(POSTING_URL, limiter=AllowAllLimiter())
+
+    def test_nothing_is_requested_at_all(self, serve, monkeypatch, resolves_to) -> None:
+        """The guard runs before robots, and robots is itself a request.
+
+        `_load_robots` fetches /robots.txt from the same host, so a guard
+        placed after it has already sent the request it exists to prevent --
+        and against a metadata endpoint that one request is the whole attack.
+        Note this test does not use the `robots` fixture: the real
+        `_load_robots` is left in place so that a regression would show up as
+        a recorded request rather than being stubbed out of view.
+        """
+        requests: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(str(request.url))
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE)
+
+        resolves_to("169.254.169.254")
+        serve(handler)
+
+        with pytest.raises(PermanentFetchError):
+            fetch_posting_text("http://169.254.169.254/latest/meta-data/",
+                               limiter=AllowAllLimiter())
+
+        assert requests == []
+
+    def test_redirect_to_a_private_address_is_blocked(
+        self, serve, robots, monkeypatch
+    ) -> None:
+        """The bypass that makes a submit-time-only check worthless.
+
+        The submitted URL is an ordinary public host. It answers 302 with a
+        Location pointing at the metadata endpoint, and httpx's
+        `follow_redirects` would have fetched it without consulting anything.
+        One line of attacker effort against a control that looks complete.
+        """
+
+        def fake_resolve(host: str, port: int) -> list[str]:
+            return ["169.254.169.254"] if host.startswith("169.254") else [PUBLIC_IP]
+
+        monkeypatch.setattr(netguard, "resolve_host", fake_resolve)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.host == "169.254.169.254":
+                return httpx.Response(
+                    200, headers={"content-type": "text/html"}, text="<html>creds</html>"
+                )
+            return httpx.Response(
+                302, headers={"location": "http://169.254.169.254/latest/meta-data/"}
+            )
+
+        serve(handler)
+
+        with pytest.raises(PermanentFetchError, match="link-local"):
+            fetch_posting_text(POSTING_URL, limiter=AllowAllLimiter())
+
+    def test_relative_redirect_still_works(self, serve, robots) -> None:
+        """Walking redirects by hand must not break the ordinary case.
+
+        A relative Location is resolved against the URL it came from, which
+        httpx used to handle for us.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/jobs/123":
+                return httpx.Response(302, headers={"location": "/jobs/moved"})
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE)
+
+        serve(handler)
+
+        assert "Senior Engineer" in fetch_posting_text(
+            POSTING_URL, limiter=AllowAllLimiter()
+        )
+
+    def test_redirect_without_a_location_is_permanent(self, serve, robots) -> None:
+        """Otherwise a 302 with no Location falls through to the body reader
+        and returns an empty posting as a success."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(302)
+
+        serve(handler)
+
+        with pytest.raises(PermanentFetchError, match="no Location"):
+            fetch_posting_text(POSTING_URL, limiter=AllowAllLimiter())
+
+    def test_unresolvable_host_is_transient(self, serve, robots, resolves_to) -> None:
+        """A DNS failure is not an attack, and must not dead-letter the job."""
+        resolves_to(error="Name or service not known")
+
+        with pytest.raises(TransientFetchError, match="resolve"):
+            fetch_posting_text(POSTING_URL, limiter=AllowAllLimiter())
 
 
 class TestRateLimitInteraction:

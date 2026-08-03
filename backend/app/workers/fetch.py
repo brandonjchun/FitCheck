@@ -28,12 +28,18 @@ import httpx
 from selectolax.parser import HTMLParser
 
 from app.config import settings
+from app.netguard import BlockedAddressError, UnresolvableHostError, assert_public_url
 from app.queues import get_redis
 from app.ratelimit import RateLimiter, domain_of
 
 logger = logging.getLogger(__name__)
 
 _ROBOTS_CACHE_PREFIX = "robots:"
+
+# Statuses that carry a Location worth following. Listed explicitly rather
+# than using httpx's `is_redirect`, because a 302 with no Location must be an
+# error here and not silently fall through to the body-reading path.
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # Status codes worth another attempt. 429 and 5xx are the host saying "not
 # now" rather than "no"; 408 is an explicit request timeout.
@@ -178,6 +184,87 @@ def _classify_status(status: int, url: str) -> FetchError:
     return PermanentFetchError(f"HTTP {status} fetching {url}")
 
 
+def _assert_fetchable(url: str) -> None:
+    """Translate a netguard verdict into this module's error vocabulary.
+
+    The two cases are caught in this order because `UnresolvableHostError`
+    subclasses `BlockedAddressError`, and they get opposite treatment: a
+    blocked address is permanent by construction, while a resolver that did
+    not answer is the ordinary transient case.
+    """
+    try:
+        assert_public_url(url)
+    except UnresolvableHostError as exc:
+        raise TransientFetchError(str(exc)) from exc
+    except BlockedAddressError as exc:
+        raise PermanentFetchError(str(exc)) from exc
+
+
+def _get_following_redirects(client: httpx.Client, url: str) -> tuple[bytes, str]:
+    """GET `url`, checking every redirect hop before following it.
+
+    Returns the raw body and the encoding to decode it with.
+
+    Redirects are walked here rather than by httpx because `follow_redirects`
+    would put every hop after the first outside the SSRF guard entirely. A
+    public host answering `302 Location: http://169.254.169.254/` is the
+    standard one-line bypass of a check that only ran on the submitted URL,
+    and it costs the attacker nothing.
+    """
+    current = url
+
+    for _ in range(settings.fetch_max_redirects + 1):
+        try:
+            # Streamed, so the byte cap can abort mid-response. A
+            # non-streaming get() has already read the whole body into memory
+            # by the time any size check could run, which makes the cap
+            # decorative.
+            with client.stream("GET", current) as response:
+                if response.status_code in _REDIRECT_STATUSES:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise PermanentFetchError(
+                            f"HTTP {response.status_code} with no Location at {current}"
+                        )
+                    # Joined against the current URL because a Location is
+                    # allowed to be relative.
+                    current = str(response.url.join(location))
+                    _assert_fetchable(current)
+                    continue
+
+                if response.status_code >= 400:
+                    raise _classify_status(response.status_code, current)
+
+                content_type = (
+                    response.headers.get("content-type", "").split(";")[0].strip().lower()
+                )
+                if content_type and not content_type.startswith(_TEXT_CONTENT_TYPES):
+                    raise PermanentFetchError(
+                        f"unsupported content type {content_type!r} at {current}"
+                    )
+
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in response.iter_bytes():
+                    total += len(chunk)
+                    if total > settings.fetch_max_bytes:
+                        raise PermanentFetchError(
+                            f"response exceeded {settings.fetch_max_bytes} bytes at {current}"
+                        )
+                    chunks.append(chunk)
+
+                return b"".join(chunks), response.encoding or "utf-8"
+
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            raise TransientFetchError(
+                f"{type(exc).__name__} fetching {current}: {exc}"
+            ) from exc
+
+    # Permanent: a redirect loop is a property of the site, and the next
+    # attempt walks the identical loop.
+    raise PermanentFetchError(f"too many redirects for {url}")
+
+
 def fetch_posting_text(url: str, limiter: RateLimiter | None = None) -> str:
     """Fetch `url` and return its readable text.
 
@@ -198,13 +285,19 @@ def fetch_posting_text(url: str, limiter: RateLimiter | None = None) -> str:
 
     with httpx.Client(
         timeout=timeout,
-        follow_redirects=True,
-        max_redirects=settings.fetch_max_redirects,
+        # Followed by hand in _get_following_redirects so that each hop passes
+        # the SSRF guard. See that function.
+        follow_redirects=False,
         headers={
             "User-Agent": settings.fetch_user_agent,
             "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.1",
         },
     ) as client:
+        # First, and before robots specifically: _load_robots fetches
+        # /robots.txt from this same host, so a guard placed after it has
+        # already made the request it exists to prevent.
+        _assert_fetchable(url)
+
         # robots before the rate limiter, so a disallowed URL does not spend a
         # token it was never going to use.
         if not is_allowed(url, client):
@@ -213,39 +306,7 @@ def fetch_posting_text(url: str, limiter: RateLimiter | None = None) -> str:
         if not limiter.acquire(host):
             raise RateLimitedError(f"rate limit budget exhausted for {host}")
 
-        try:
-            # Streamed, so the byte cap can abort mid-response. A non-streaming
-            # get() has already read the whole body into memory by the time
-            # any size check could run, which makes the cap decorative.
-            with client.stream("GET", url) as response:
-                if response.status_code >= 400:
-                    raise _classify_status(response.status_code, url)
-
-                content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
-                if content_type and not content_type.startswith(_TEXT_CONTENT_TYPES):
-                    raise PermanentFetchError(
-                        f"unsupported content type {content_type!r} at {url}"
-                    )
-
-                chunks: list[bytes] = []
-                total = 0
-                for chunk in response.iter_bytes():
-                    total += len(chunk)
-                    if total > settings.fetch_max_bytes:
-                        raise PermanentFetchError(
-                            f"response exceeded {settings.fetch_max_bytes} bytes at {url}"
-                        )
-                    chunks.append(chunk)
-
-                body = b"".join(chunks)
-                encoding = response.encoding or "utf-8"
-
-        except httpx.TooManyRedirects as exc:
-            # Permanent: a redirect loop is a property of the site, and the
-            # next attempt walks the identical loop.
-            raise PermanentFetchError(f"too many redirects for {url}") from exc
-        except (httpx.TimeoutException, httpx.TransportError) as exc:
-            raise TransientFetchError(f"{type(exc).__name__} fetching {url}: {exc}") from exc
+        body, encoding = _get_following_redirects(client, url)
 
     html = body.decode(encoding, errors="replace")
     return html_to_text(html)

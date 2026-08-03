@@ -13,6 +13,8 @@ actually be fetched.
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from app.netguard import blocked_without_dns_reason
+
 # Matches a URI scheme prefix per RFC 3986. Used to tell "this line already
 # declares a scheme" (http, mailto, javascript, file) from "this is a bare
 # hostname" -- the two need opposite handling, and only the second gets an
@@ -119,6 +121,20 @@ def normalize_url(url: str) -> str | None:
         return None
 
     host = hostname.lower()
+
+    # Literal private addresses die here, where the check is pure parsing and
+    # a 500-URL batch costs no DNS queries. `http://169.254.169.254/` is a
+    # well-formed http URL with a real host and passes every other rule in
+    # this function -- rejecting non-http schemes stops `file:///etc/passwd`
+    # and does nothing about the address that hands out cloud credentials.
+    #
+    # This is the cheap half of the control, not the whole of it. A hostname
+    # cannot be judged without resolving it, and neither can `2130706433`,
+    # which is 127.0.0.1 written as a decimal integer and which the resolver
+    # accepts. netguard.assert_public_url covers both at fetch time.
+    if blocked_without_dns_reason(host) is not None:
+        return None
+
     if port and not (
         (scheme == "http" and port == 80) or (scheme == "https" and port == 443)
     ):

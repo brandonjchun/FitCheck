@@ -119,6 +119,35 @@ class TestNormalizeUrl:
         """
         assert normalize_url(raw) is None
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:6379/",
+            "http://localhost:5432/",
+            "http://10.0.0.5/admin",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://[::1]/",
+            "http://0.0.0.0/",
+        ],
+    )
+    def test_literal_internal_addresses_rejected(self, raw: str) -> None:
+        """Rejecting non-http schemes does nothing about these.
+
+        Every one is a well-formed http URL with a real host, so it passes
+        every other rule in normalize_url. The first is the AWS/GCP/Azure
+        metadata endpoint, which serves instance credentials to anything on
+        the local link, and the second is our own session store.
+        """
+        assert normalize_url(raw) is None
+
+    def test_hostnames_are_not_rejected_here(self) -> None:
+        """The literal check does no DNS on purpose -- a 500-URL batch would
+        otherwise cost 500 resolutions inside a request handler. Hostnames
+        pointing at private addresses are caught at fetch time instead."""
+        assert normalize_url("https://boards.example.com/jobs/1") is not None
+
     def test_tracking_param_matching_is_case_insensitive(self) -> None:
         assert normalize_url("https://e.com/j?UTM_Source=x") == "https://e.com/j"
 

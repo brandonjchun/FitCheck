@@ -20,6 +20,7 @@ from app.queues import (
 )
 from app.schemas import JobResponse, JobSubmitRequest
 from app.security import current_user
+from app.urls import normalize_url
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,22 @@ def submit_job(
     Submitting the same URL twice for the same profile returns the existing
     job rather than creating a duplicate scrape.
     """
-    url = str(payload.url)
+    # Normalized on the way in, exactly as the batch endpoint does. Without
+    # this the two submission paths disagree: a batch upload collapses
+    # `?utm_source=x` onto the bare URL before hashing, while this endpoint
+    # hashed whatever was pasted -- so the same posting arriving by both
+    # routes produced two ingest jobs, two fetches, and one job_postings row,
+    # which reads as a dedupe bug in whichever half you look at second.
+    #
+    # It also runs the literal-address check, so a submitted
+    # `http://169.254.169.254/` is refused here rather than at the worker.
+    url = normalize_url(str(payload.url))
+    if url is None:
+        raise HTTPException(
+            status_code=422,
+            detail="URL is not a fetchable http(s) address",
+        )
+
     url_digest = hash_url(url)
 
     # The profile id arrives in the body rather than the path, so

@@ -233,6 +233,68 @@ class TestSubmitJob:
         assert a.json()["id"] != b.json()["id"]
         assert len(queue.calls) == 2
 
+    def test_tracking_params_collapse_onto_one_job(self, client, queue, profile_id):
+        """The same posting from a newsletter and from the address bar.
+
+        This endpoint used to hash whatever was pasted while the batch upload
+        normalized first, so the two submission paths disagreed about what
+        counts as a duplicate -- two ingest jobs and two outbound fetches
+        resolving to one `job_postings` row, which reads as a dedupe bug in
+        whichever half you inspect second.
+        """
+        first = client.post(
+            "/api/jobs",
+            json={
+                "url": "https://example.com/jobs/x?utm_source=newsletter",
+                "profile_id": profile_id,
+            },
+        )
+        second = client.post(
+            "/api/jobs",
+            json={"url": "https://example.com/jobs/x", "profile_id": profile_id},
+        )
+
+        assert first.json()["id"] == second.json()["id"]
+        assert len(queue.calls) == 1
+
+    def test_the_stored_url_is_the_normalized_one(self, client, queue, profile_id):
+        """The worker fetches `job.url`, so normalizing only the hash would
+        dedupe correctly and still request the tracking URL."""
+        response = client.post(
+            "/api/jobs",
+            json={
+                "url": "https://EXAMPLE.com/jobs/y?utm_medium=email#apply",
+                "profile_id": profile_id,
+            },
+        )
+
+        assert response.json()["url"] == "https://example.com/jobs/y"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:6379/",
+            "http://localhost:5432/",
+            "http://192.168.1.1/",
+        ],
+    )
+    def test_internal_addresses_are_refused_at_submit(
+        self, client, queue, profile_id, url: str
+    ):
+        """SSRF, rejected before a row exists.
+
+        The worker guard in netguard.py is the authoritative one -- it also
+        resolves hostnames -- but a literal address should never get as far
+        as being queued, and 422 tells the caller why immediately.
+        """
+        response = client.post(
+            "/api/jobs", json={"url": url, "profile_id": profile_id}
+        )
+
+        assert response.status_code == 422
+        assert queue.calls == []
+
     def test_redis_down_still_persists_the_job(self, client, queue, profile_id):
         """A broker outage must not lose the submission.
 
