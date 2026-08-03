@@ -89,7 +89,22 @@ def create_batch(
 
     raw = file.file.read()
     try:
-        text = raw.decode("utf-8")
+        # utf-8-sig, not utf-8: strips a leading byte order mark if one is
+        # there and behaves identically if it is not.
+        #
+        # Notepad and PowerShell's `-Encoding utf8` both prepend EF BB BF to a
+        # file they save. Plain utf-8 decodes that faithfully into a U+FEFF
+        # character glued to the front of line one, so the first URL no longer
+        # starts with "http" and is counted as unreadable -- while looking
+        # perfectly correct to anyone who opens the file, because the
+        # character is invisible.
+        #
+        # Worse than losing a row: it corrupts the accounting this endpoint
+        # exists to provide. With line one discarded, a later repeat of that
+        # same URL becomes its first occurrence and is accepted rather than
+        # counted as a duplicate, so `rejected` and `duplicates` are both
+        # wrong rather than merely off by one.
+        text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         # A .txt that is not UTF-8 is usually a mis-picked file rather than an
         # exotic encoding, and guessing at encodings produces URLs with

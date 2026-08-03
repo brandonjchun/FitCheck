@@ -192,6 +192,58 @@ class TestCreateBatch:
 
         assert response.status_code == 400
 
+    def test_a_byte_order_mark_does_not_eat_the_first_url(
+        self, client, queues, profile_id
+    ):
+        """Notepad and PowerShell both write EF BB BF at the head of a file.
+
+        Decoded as plain utf-8 those bytes become a U+FEFF glued to line one,
+        so the first URL stops starting with "http" and is counted as
+        unreadable -- while looking perfectly correct to anyone who opens the
+        file to check, because the character is invisible.
+
+        The duplicate here is the second half of the damage, and the reason
+        this is worth a test rather than a shrug. With line one discarded, the
+        repeat of that same URL becomes a *first* occurrence and is accepted,
+        so `rejected` and `duplicates` are both wrong rather than the count
+        merely being short by one. That silently corrupts the per-line
+        accounting this endpoint exists to provide.
+        """
+        # Written as an escape, not as a literal. A test about an invisible
+        # character should not contain one.
+        body = "\ufeff" + "\n".join(
+            [
+                "https://e.com/j/1",
+                "https://e.com/j/2",
+                "https://e.com/j/1",  # repeat of line one
+            ]
+        )
+
+        response = client.post(
+            f"{BATCH_URL}?profile_id={profile_id}",
+            files={"file": ("urls.txt", body.encode("utf-8"), "text/plain")},
+        )
+
+        assert response.status_code == 202
+        payload = response.json()
+        assert payload["accepted"] == 2
+        assert payload["duplicates"] == 1
+        assert payload["rejected"] == 0
+
+        # And the surviving first URL is the real one, not one carrying an
+        # invisible character into the dedupe key.
+        db = SessionLocal()
+        try:
+            urls = {
+                job.url
+                for job in db.query(IngestJob)
+                .filter(IngestJob.batch_id == payload["id"])
+                .all()
+            }
+            assert urls == {"https://e.com/j/1", "https://e.com/j/2"}
+        finally:
+            db.close()
+
     def test_urls_already_submitted_do_not_duplicate_the_job(
         self, client, queues, profile_id
     ):
