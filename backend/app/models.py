@@ -39,7 +39,17 @@ from app.skills import normalize_skill_items
 # reject a typo -- the Literal and the API schema are what enforce it.
 JobStatus = Literal["queued", "running", "succeeded", "failed", "dead"]
 
-TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "failed", "dead"})
+# States a job will never leave. `failed` is deliberately not one of them:
+# it is the *retryable* failure, the state a job sits in between attempts,
+# and `dead` is the one that means the retry budget is gone.
+#
+# It was in this set until an integration test drove a real worker through a
+# transient failure and asked what the row said. The frontend polls a job
+# until `is_terminal` (Workspace.tsx, JobRow), so including `failed` stopped
+# the poll on the first transient error -- freezing the row on the label
+# "Failed -- will retry" and never showing the retry that succeeded seconds
+# later. The label and the polling rule disagreed, and the label was right.
+TERMINAL_STATUSES: frozenset[str] = frozenset({"succeeded", "dead"})
 
 # Consecutive failed crawls before a source is rested. Spec section 9 item 7.
 #
@@ -713,7 +723,10 @@ class IngestJob(Base):
     def is_terminal(self) -> bool:
         """Whether this job has reached a state it will never leave.
 
-        The frontend polls until this is true (spec section 7.2).
+        The frontend polls until this is true (spec section 7.2), which is
+        what makes the distinction between `failed` and `dead` load-bearing
+        rather than descriptive: a client that stops watching at `failed`
+        misses every retry that succeeds. See TERMINAL_STATUSES.
         """
         return self.status in TERMINAL_STATUSES
 

@@ -436,6 +436,17 @@ def _record_failure(job_id: int, exc: Exception, permanent: bool = False) -> Non
     `permanent` goes straight to `dead` regardless of the attempt count. A 404
     on attempt one is as final as a 404 on attempt three, and leaving it
     `failed` would misreport it as something a requeue sweep should pick up.
+
+    **`>` and not `>=`, and the difference is one whole execution.**
+    `Retry(max=N)` gives N retries *after* the first run, so an unfixable job
+    is executed N+1 times and `attempts` reaches MAX_RETRIES + 1. Comparing
+    with `>=` marked the row `dead` on execution N while RQ still had a retry
+    parked -- so for one attempt in four, the dead-letter list showed a job as
+    having exhausted its retries when it had not, and an operator requeueing
+    it there would have put a second worker on a row the first was still
+    scheduled to run. Found by driving a real worker through the whole
+    schedule; no direct call to this function can see it, because the fact it
+    gets wrong is about RQ's state rather than its own.
     """
     from app.queues import MAX_RETRIES
 
@@ -445,7 +456,7 @@ def _record_failure(job_id: int, exc: Exception, permanent: bool = False) -> Non
             return
 
         job.last_error = f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
-        if permanent or job.attempts >= MAX_RETRIES:
+        if permanent or job.attempts > MAX_RETRIES:
             job.status = "dead"
         else:
             job.status = "failed"

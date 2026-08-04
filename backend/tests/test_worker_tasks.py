@@ -15,7 +15,7 @@ from app.db import SessionLocal
 from app.extraction import PROFILE_EXTRACTION_VERSION, ExtractedProfile
 from app.models import IngestJob, JobPosting, Profile, hash_url, dedupe_key_for_submission
 from app.providers import LLMPermanentError, LLMTransientError
-from app.queues import QUEUE_INGEST, QUEUE_INTERACTIVE, QUEUE_SCORING
+from app.queues import MAX_RETRIES, QUEUE_INGEST, QUEUE_INTERACTIVE, QUEUE_SCORING
 from app.workers import tasks
 from app.workers.fetch import PermanentFetchError, TransientFetchError
 
@@ -409,8 +409,10 @@ class TestProcessJobUrl:
         try:
             job = db.get(IngestJob, job_id)
             # _record_failure runs *after* process_job_url incremented the
-            # counter, so this is the state of a third and final attempt.
-            job.attempts = 3  # == MAX_RETRIES
+            # counter, and Retry(max=N) allows N retries *after* the first
+            # run -- so the last attempt of an unfixable job is number N+1,
+            # not N. Driven end to end in test_retry_integration.py.
+            job.attempts = MAX_RETRIES + 1
             db.commit()
         finally:
             db.close()
@@ -420,9 +422,28 @@ class TestProcessJobUrl:
         db = SessionLocal()
         try:
             job = db.get(IngestJob, job_id)
-            assert job.status == "dead"  # attempts (3) >= MAX_RETRIES
+            assert job.status == "dead"
             assert "fetch exploded" in job.last_error
             assert job.is_terminal is True
+        finally:
+            db.close()
+
+    def test_the_last_retry_is_not_dead_yet(self, job_id):
+        """Attempt N of N+1: RQ still has one go left, so the row must not
+        claim the retries are exhausted."""
+        db = SessionLocal()
+        try:
+            job = db.get(IngestJob, job_id)
+            job.attempts = MAX_RETRIES
+            db.commit()
+        finally:
+            db.close()
+
+        tasks._record_failure(job_id, RuntimeError("transient blip"))
+
+        db = SessionLocal()
+        try:
+            assert db.get(IngestJob, job_id).status == "failed"
         finally:
             db.close()
 
@@ -433,7 +454,9 @@ class TestProcessJobUrl:
         try:
             job = db.get(IngestJob, job_id)
             assert job.status == "failed"
-            assert job.is_terminal is True
+            # Not terminal: the frontend polls until is_terminal, and a job
+            # awaiting a retry is precisely what it must keep watching.
+            assert job.is_terminal is False
         finally:
             db.close()
 
