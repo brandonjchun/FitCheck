@@ -408,8 +408,43 @@ def _upsert_posting(
     ).hexdigest()
 
     key = canonical_key_for_url(url)
+    # Same reasoning as the inline path: this needs no LLM, so there is no
+    # reason for the filter to be wrong in the window before extraction runs.
+    # None means the title states no level, and the writes below treat that as
+    # "leave it alone".
+    derived_seniority = seniority_from_title(title)
 
     with _session() as db:
+        conflict_updates = {
+            "url": url,
+            # COALESCE so a user submitting a URL that the crawler already owns
+            # does not orphan it from its board. A user-submitted fetch carries
+            # no source and must not erase one.
+            "source_id": func.coalesce(
+                pg_insert(JobPosting).excluded.source_id,
+                JobPosting.source_id,
+            ),
+            # Same shape, same reason. A re-crawl should follow a renamed role,
+            # and this is also what repairs the rows an earlier crawl stored
+            # with no title at all -- without needing a migration to do it. The
+            # COALESCE is what keeps a titleless user submission from undoing
+            # that.
+            "title": func.coalesce(
+                pg_insert(JobPosting).excluded.title,
+                JobPosting.title,
+            ),
+            "content_hash": content_hash,
+            "raw_text": raw_text,
+            "last_seen_at": func.now(),
+        }
+        # Omitted rather than nulled when the title states no level, matching
+        # the inline path. Note this branch does *not* clear
+        # `extraction_version`, so a stored seniority here may be the only one
+        # this row ever gets -- overwriting it with null would be a straight
+        # loss.
+        if derived_seniority is not None:
+            conflict_updates["seniority"] = derived_seniority
+
         statement = (
             pg_insert(JobPosting)
             .values(
@@ -419,32 +454,11 @@ def _upsert_posting(
                 content_hash=content_hash,
                 raw_text=raw_text,
                 title=title,
+                seniority=derived_seniority,
             )
             .on_conflict_do_update(
                 index_elements=["canonical_key"],
-                set_={
-                    "url": url,
-                    # COALESCE so a user submitting a URL that the crawler
-                    # already owns does not orphan it from its board. A
-                    # user-submitted fetch carries no source and must not
-                    # erase one.
-                    "source_id": func.coalesce(
-                        pg_insert(JobPosting).excluded.source_id,
-                        JobPosting.source_id,
-                    ),
-                    # Same shape, same reason. A re-crawl should follow a
-                    # renamed role, and this is also what repairs the rows an
-                    # earlier crawl stored with no title at all -- without
-                    # needing a migration to do it. The COALESCE is what keeps
-                    # a titleless user submission from undoing that.
-                    "title": func.coalesce(
-                        pg_insert(JobPosting).excluded.title,
-                        JobPosting.title,
-                    ),
-                    "content_hash": content_hash,
-                    "raw_text": raw_text,
-                    "last_seen_at": func.now(),
-                },
+                set_=conflict_updates,
             )
             .returning(JobPosting.id)
         )
@@ -986,6 +1000,18 @@ def _ingest_inline_posting(
     those cost the same whether the text arrived by fetch or by listing.
     """
     content_hash = content_hash_for(posting.content or "")
+    # Derived here rather than left to extraction, because extraction is the
+    # slow half and this needs none of it. A crawl of a large board ingests
+    # hundreds of postings in one request and their scoring drains over the
+    # following hours; until it does, every one of them has a correct title and
+    # a null `seniority`, so the feed's filter silently omits roles it has
+    # already stored the answer for. Measured after one crawl: 122 staff-titled
+    # postings sitting at null while the filter showed 93.
+    #
+    # None when the title states no level, which the writes below treat as
+    # "leave it alone" rather than "write null" -- the extraction still owns
+    # every ladder that does not put a level in the title.
+    derived_seniority = seniority_from_title(posting.title)
 
     with _session() as db:
         existing = db.execute(
@@ -1015,12 +1041,46 @@ def _ingest_inline_posting(
             # was just refreshed. Without this, a row the old extraction filed
             # as "junior" would stay wrong for as long as the posting sits
             # unedited on the board, which for a staff role is months.
+            #
+            # Recomputed from `existing.title` rather than reusing
+            # `derived_seniority`, because the line above may have kept the
+            # stored title when the listing carried none.
             existing.seniority = (
                 seniority_from_title(existing.title) or existing.seniority
             )
             db.commit()
             _record_gate_hit(canonical_key, hit=True)
             return
+
+        conflict_updates = {
+            "url": posting.url,
+            "source_id": source_id,
+            "content_hash": content_hash,
+            "raw_text": posting.content,
+            "source_updated_at": posting.updated_at,
+            "last_seen_at": func.now(),
+            # Refreshed on every re-crawl, not just on insert. The
+            # board is the authority on its own posting's title, so a
+            # renamed role should follow -- and this is also what
+            # repairs rows whose title an earlier extraction nulled
+            # out, without needing a migration to do it.
+            "title": posting.title,
+            # Changed content invalidates the old extraction. Clearing
+            # the version is what makes `extraction_is_current` false
+            # and gets it re-extracted, rather than leaving stale
+            # skills attached to new text.
+            "extraction_version": None,
+            "closed_at": None,
+        }
+        # Absent from the dict rather than set to null, which is the whole
+        # reason this is built as a dict instead of written inline. A title that
+        # states no level must leave the column alone: the row reaching this
+        # branch may already hold a seniority a previous extraction worked out
+        # from the body, and overwriting that with null would make a re-crawl
+        # *lose* information. `extraction_version` is cleared just above, so
+        # anything this defers on is re-extracted anyway.
+        if derived_seniority is not None:
+            conflict_updates["seniority"] = derived_seniority
 
         statement = (
             pg_insert(JobPosting)
@@ -1031,30 +1091,14 @@ def _ingest_inline_posting(
                 content_hash=content_hash,
                 raw_text=posting.content,
                 title=posting.title,
+                # Null is safe on an insert -- there is no prior value to erase,
+                # and extraction fills it in shortly after.
+                seniority=derived_seniority,
                 source_updated_at=posting.updated_at,
             )
             .on_conflict_do_update(
                 index_elements=["canonical_key"],
-                set_={
-                    "url": posting.url,
-                    "source_id": source_id,
-                    "content_hash": content_hash,
-                    "raw_text": posting.content,
-                    "source_updated_at": posting.updated_at,
-                    "last_seen_at": func.now(),
-                    # Refreshed on every re-crawl, not just on insert. The
-                    # board is the authority on its own posting's title, so a
-                    # renamed role should follow -- and this is also what
-                    # repairs rows whose title an earlier extraction nulled
-                    # out, without needing a migration to do it.
-                    "title": posting.title,
-                    # Changed content invalidates the old extraction. Clearing
-                    # the version is what makes `extraction_is_current` false
-                    # and gets it re-extracted, rather than leaving stale
-                    # skills attached to new text.
-                    "extraction_version": None,
-                    "closed_at": None,
-                },
+                set_=conflict_updates,
             )
             .returning(JobPosting.id)
         )

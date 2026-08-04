@@ -719,6 +719,118 @@ class TestSeniorityFromTitleWins:
 
         assert seen["title"] == "Music Editor, Indonesia"
 
+    def test_ingest_sets_it_before_any_extraction_runs(self, source_id) -> None:
+        """The filter must not be wrong in the window before scoring catches up.
+
+        A crawl of a large board ingests hundreds of postings in one request and
+        their scoring drains over the following hours. Leaving `seniority` to
+        extraction meant every one of them sat at null with a perfectly good
+        title already stored -- 122 staff-titled postings in that state after one
+        crawl, while the feed's filter showed 93.
+
+        No extraction is stubbed here on purpose: the point is that this needs
+        none.
+        """
+        url = f"{BOARD}/fresh-staff"
+        key = canonical_key_for_url(url)
+
+        tasks._ingest_inline_posting(
+            source_id,
+            key,
+            DiscoveredPosting(
+                external_id="fresh-staff",
+                url=url,
+                title="Staff Software Engineer, Privacy & Data Security",
+                content="Inline description text. " * 20,
+            ),
+        )
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(JobPosting.canonical_key == key)
+            ).scalar_one()
+            assert row.seniority == "staff"
+            assert row.extraction_version is None, (
+                "the point is that this happened without an extraction"
+            )
+        finally:
+            db.close()
+
+    def test_a_level_free_title_does_not_erase_a_stored_seniority(
+        self, source_id
+    ) -> None:
+        """Deferring must mean "leave it alone", not "write null".
+
+        A row reaching the re-ingest branch may already hold a seniority a
+        previous extraction worked out from the body. Writing null over that
+        because the title happens not to say "Senior" would make a re-crawl lose
+        information it had.
+        """
+        url = f"{BOARD}/level-free"
+        key = canonical_key_for_url(url)
+
+        db = SessionLocal()
+        try:
+            db.add(
+                JobPosting(
+                    canonical_key=key,
+                    url=url,
+                    source_id=source_id,
+                    content_hash="stale-hash",
+                    raw_text="old text",
+                    title="Music Editor, Indonesia",
+                    seniority="mid",
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        # Changed content, so this takes the re-ingest branch rather than the
+        # gate.
+        tasks._ingest_inline_posting(
+            source_id,
+            key,
+            DiscoveredPosting(
+                external_id="level-free",
+                url=url,
+                title="Music Editor, Indonesia",
+                content="Brand new inline description. " * 20,
+            ),
+        )
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(JobPosting.canonical_key == key)
+            ).scalar_one()
+            assert row.seniority == "mid"
+        finally:
+            db.close()
+
+    def test_the_fetch_path_sets_it_too(self, source_id) -> None:
+        """Both ingest routes behave the same. A posting that arrives by fetch
+        has the same title and the same claim on a correct filter."""
+        url = f"{BOARD}/fetched-staff"
+        tasks._upsert_posting(
+            url,
+            "Backend role. " * 30,
+            source_id=source_id,
+            title="Principal Platform Engineer",
+        )
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(
+                    JobPosting.canonical_key == canonical_key_for_url(url)
+                )
+            ).scalar_one()
+            assert row.seniority == "staff"
+        finally:
+            db.close()
+
     def test_a_gate_hit_repairs_a_wrong_seniority(self, source_id) -> None:
         """Without this, the fix waits on the board editing the posting.
 
