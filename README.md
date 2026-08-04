@@ -411,7 +411,7 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 
 ### What's actually in the repo today
 
-- **M1/M2 complete.** Resume upload, PDF/DOCX text extraction, LLM extraction behind a swappable provider seam (Gemini and Ollama), skill alias normalization, `extraction_version` stamped on every extraction, request size cap enforced in ASGI middleware, and a 171-test pytest suite covering documents, extraction, skills, providers, middleware, and endpoints.
+- **M1/M2 complete.** Resume upload, PDF/DOCX text extraction, LLM extraction behind a swappable provider seam (Gemini and Ollama), skill alias normalization, `extraction_version` stamped on every extraction, request size cap enforced in ASGI middleware, and a pytest suite covering documents, extraction, skills, providers, middleware, and endpoints. That suite was 171 tests at M2 and is **661** across the whole backend today.
 
   Two design points worth knowing. **Skill normalization happens on read, not on write** — `profiles.extracted` holds exactly what the model returned, so adding an alias applies retroactively to every stored profile with no backfill and no second LLM call. And **`extraction_version` is only bumped by prompt or schema changes**, not alias changes, because the latter no longer alter what was extracted.
 - **M3 complete.** Register, login, logout, and `/me`; Argon2id password hashing; opaque session ids in `HttpOnly` cookies with the body in Redis; and an `owned_profile` dependency that every profile-scoped endpoint takes so the ownership predicate cannot be left out of one handler. Reaching for another user's profile returns **404, not 403** — a 403 confirms the row exists and turns the endpoint into an id-enumeration oracle.
@@ -444,7 +444,15 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 
   Verified through the whole stack, not just in tests — API → `ingest` queue → containerised worker → `job_postings`. A four-URL batch drained in 4 seconds: two succeeded, two went straight to `dead` (a 404 and a robots disallow) without consuming a single retry.
 
-- **Frontend exists** (landing, sign-in, workspace) and is wired to session auth. The batch progress view is what's still missing from M4's definition of done.
+- **Frontend complete through M10.** Landing, sign-in, workspace, ranked feed, insights, saved, and the ops dashboard, all wired to session auth. The batch progress view that M4's definition of done asked for is there too — an aggregate poll per batch rather than one per job, with the bar scaled off the batch's own `total` so a missing job row shows as a short bar instead of rescaling to look finished. 127 component and hook tests, `tsc -b` and `oxlint` clean.
+
+  **Nobody has run it and looked at it.** Everything above is verified by typecheck, lint, and tests; layout and spacing are not verified by any of those.
+
+- **Retry behaviour is proven against a real worker.** `tests/test_retry_integration.py` drives an RQ worker through the whole schedule — transient failure, reschedule, backoff, exhaustion, dead-letter — plus the recovery case, without which every other assertion is also satisfied by a worker that retries and can never succeed.
+
+  The backoff is 10s / 60s / 300s, so waiting it out would cost six minutes per run. It doesn't: the fact under test is that the worker parks the job at `now + interval`, which is readable from the scheduled registry the instant it fails, and the test then rewrites that timestamp into the past and lets RQ's own scheduler release it. Sixteen tests in four seconds.
+
+  **It found two defects that no direct call to the task could.** Both were about how the row read *relative to what RQ was still going to do*, which a unit test has no RQ to be relative to. `failed` was in `TERMINAL_STATUSES`, so the workspace stopped polling on the first transient error and froze the row on "Failed — will retry" without ever showing the retry succeed. And `_record_failure` compared `attempts >= MAX_RETRIES` when `Retry(max=N)` allows N retries *after* the first run — so the dead-letter list reported a job as having exhausted its retries for one full execution before it had.
 
 ### Known rework, in the order it bites
 
