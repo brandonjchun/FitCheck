@@ -1,0 +1,101 @@
+/* Shared shell for the two post-login pages. Matches `.dashboard`'s vertical
+   rhythm so moving between tabs does not shift the content block. */
+.page-shell {
+  padding-block: clamp(7rem, 14vh, 9rem) var(--space-9);
+  min-height: 100svh;
+  background: var(--bg-sunken);
+}
+
+.page-head {
+  margin-bottom: var(--space-6);
+}
+
+.page-head h1 {
+  font-size: var(--step-3);
+}
+
+.page-sub {
+  margin-top: var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--step--1);
+  max-width: 68ch;
+}
+
+.page-empty {
+  padding: var(--space-6);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 0.88rem;
+  max-width: 68ch;
+}
+
+.insights-note {
+  margin-bottom: var(--space-5);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  max-width: 64ch;
+}
+
+.gap-list {
+  display: grid;
+  gap: var(--space-3);
+  list-style: none;
+}
+
+.gap-row {
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+/* Severity colours the left edge only. Tinting the whole card would make a
+   list of twelve gaps read as twelve alarms, and the point of ranking them is
+   that the first two are the ones worth acting on. */
+.gap-row.sev-high { border-left-color: var(--danger); }
+.gap-row.sev-mid  { border-left-color: var(--warn); }
+.gap-row.sev-low  { border-left-color: var(--border-strong); }
+
+.gap-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.gap-name {
+  font-weight: 600;
+}
+
+.gap-blocking {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--danger);
+  white-space: nowrap;
+}
+
+.gap-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--bg-sunken);
+}
+
+.seg { display: block; height: 100%; }
+.seg-missing { background: var(--danger); }
+.seg-partial { background: var(--warn); }
+.seg-matched { background: var(--ok); }
+
+.gap-legend {
+  display: flex;
+  gap: var(--space-4);
+  margin-top: var(--space-2);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

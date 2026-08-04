@@ -1,0 +1,87 @@
+/* `.page-shell`, `.page-head`, `.page-sub` and `.page-empty` are defined in
+   Insights.css, which both pages import transitively through the bundle. Kept
+   in one place rather than duplicated so the two tabs cannot drift apart. */
+
+.saved-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-5);
+}
+
+.saved-controls .is-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.saved-count {
+  margin-left: auto;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.saved-list {
+  display: grid;
+  gap: var(--space-2);
+  list-style: none;
+}
+
+.saved-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+/* The verdict is the row's identity, so it gets the edge. `not_interested` is
+   dimmed rather than coloured: it is a decision the user made, not a problem
+   they need to look at. */
+.saved-row.verdict-applied        { border-left-color: var(--ok); }
+.saved-row.verdict-interested     { border-left-color: var(--accent); }
+.saved-row.verdict-not_interested { opacity: 0.6; }
+
+.saved-score {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 0.9rem;
+  min-width: 3ch;
+  text-align: right;
+}
+
+.saved-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.saved-title {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.74rem;
+  color: var(--text-muted);
+}
+
+.saved-closed {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}

@@ -42,6 +42,9 @@ export type SourceFreshness = components["schemas"]["SourceFreshness"];
 export type Feedback = components["schemas"]["FeedbackResponse"];
 export type FeedbackVerdict = components["schemas"]["FeedbackCreate"]["verdict"];
 export type RecommendationRun = components["schemas"]["RecommendationRun"];
+export type SkillGapReport = components["schemas"]["SkillGapReport"];
+export type SkillGap = components["schemas"]["SkillGap"];
+export type SavedMatch = components["schemas"]["SavedMatch"];
 export type WorkerInfo = components["schemas"]["WorkerInfo"];
 export type DeadLetterItem = components["schemas"]["DeadLetterItem"];
 
@@ -192,6 +195,14 @@ export const matchApi = {
   /* Asks for the feed to be built. Safe to call whenever the feed looks
    * empty: the server answers `already_current` without touching the queue
    * if this profile already has a feed under the current scorer. */
+  /* Omitting profileId aggregates across every resume, which is the more
+   * interesting view: a gap present under all of them is a gap in the person
+   * rather than in one document. */
+  saved: (verdict?: string) =>
+    api
+      .get<SavedMatch[]>("/api/matches/saved", { params: verdict ? { verdict } : {} })
+      .then((r) => r.data),
+
   recommend: (profileId: number) =>
     api
       .post<RecommendationRun>("/api/matches/recommendations", null, {
@@ -210,4 +221,13 @@ export const opsApi = {
 
   requeue: (jobId: number) =>
     api.post(`/api/ops/jobs/${jobId}/requeue`).then((r) => r.data),
+};
+
+export const insightsApi = {
+  skillGaps: (profileId?: number) =>
+    api
+      .get<SkillGapReport>("/api/insights/skill-gaps", {
+        params: profileId ? { profile_id: profileId } : {},
+      })
+      .then((r) => r.data),
 };

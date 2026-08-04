@@ -82,6 +82,16 @@ export function Header() {
               <NavLink to="/app" className="btn btn-ghost">
                 Workspace
               </NavLink>
+              {/* Unlocked by signing in. These read data that only exists
+                * once a resume has been scored against something, so showing
+                * them to a signed-out visitor would be advertising empty
+                * pages. */}
+              <NavLink to="/insights" className="btn btn-ghost">
+                Insights
+              </NavLink>
+              <NavLink to="/saved" className="btn btn-ghost">
+                Saved
+              </NavLink>
               {/* Hidden rather than shown-and-refused. This is presentation
                 * only -- the server checks the same flag on every ops request
                 * and a forged client gains nothing but a different error. */}

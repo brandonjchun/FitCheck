@@ -441,6 +441,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/matches/saved": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Saved Matches
+         * @description Everything the caller reacted to, most recent reaction first.
+         *
+         *     Declared *before* `/{match_id}`, and that ordering is load-bearing:
+         *     FastAPI matches routes in declaration order, so the other way round this
+         *     path would be captured by the id route and answered with a 422 about
+         *     "saved" not being an integer.
+         *
+         *     **One row per match, not one per verdict.** `match_feedback` is
+         *     append-only, so a posting marked interested and later applied has two
+         *     rows; this is a tracker, and a tracker showing the same job twice at two
+         *     stages is a worse tracker. `DISTINCT ON` takes the newest per match, which
+         *     is the current state -- while the history stays intact underneath for the
+         *     ranking model that would eventually read it.
+         */
+        get: operations["saved_matches_api_matches_saved_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/matches/{match_id}": {
         parameters: {
             query?: never;
@@ -607,6 +639,35 @@ export interface paths {
          *     exhausted.
          */
         post: operations["requeue_api_ops_jobs__job_id__requeue_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/insights/skill-gaps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Skill Gaps
+         * @description The requirements this user fails most often, across their matches.
+         *
+         *     Scoped to the caller's own profiles by joining through `profiles` on
+         *     `user_id`, not by filtering afterwards -- the same structural approach the
+         *     match endpoints use, so there is no version of this query that can read
+         *     somebody else's feed.
+         *
+         *     `profile_id` is optional. Omitted, it aggregates across every resume the
+         *     user has, which is the more interesting view: a gap that shows up under
+         *     all of them is a gap in the person rather than in one document.
+         */
+        get: operations["skill_gaps_api_insights_skill_gaps_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1121,6 +1182,68 @@ export interface components {
             status: string;
             /** Queue */
             queue: string;
+        };
+        /**
+         * SavedMatch
+         * @description A match the user reacted to, with the reaction attached.
+         */
+        SavedMatch: {
+            /** Match Id */
+            match_id: number;
+            /** Profile Id */
+            profile_id: number;
+            /** Job Posting Id */
+            job_posting_id: number;
+            /** Final Score */
+            final_score: number;
+            /** Verdict */
+            verdict: string;
+            /**
+             * Verdict At
+             * Format: date-time
+             */
+            verdict_at: string;
+            /** Posting Url */
+            posting_url?: string | null;
+            /** Posting Title */
+            posting_title?: string | null;
+            /** Posting Company */
+            posting_company?: string | null;
+            /**
+             * Posting Closed
+             * @default false
+             */
+            posting_closed: boolean;
+        };
+        /**
+         * SkillGap
+         * @description How one requirement fared across a user's whole feed.
+         *
+         *     All four buckets travel together rather than just the bad news, because
+         *     the ratio is the point: "missing in 3 of 40" is noise and "missing in 30
+         *     of 40" is the next thing to learn, and the raw count alone cannot tell
+         *     those apart.
+         */
+        SkillGap: {
+            /** Name */
+            name: string;
+            /** Missing */
+            missing: number;
+            /** Partial */
+            partial: number;
+            /** Matched */
+            matched: number;
+            /** Blocking */
+            blocking: number;
+        };
+        /** SkillGapReport */
+        SkillGapReport: {
+            /** Profile Id */
+            profile_id?: number | null;
+            /** Matches Analyzed */
+            matches_analyzed: number;
+            /** Gaps */
+            gaps: components["schemas"]["SkillGap"][];
         };
         /**
          * SourceFreshness
@@ -1765,6 +1888,38 @@ export interface operations {
             };
         };
     };
+    saved_matches_api_matches_saved_get: {
+        parameters: {
+            query?: {
+                verdict?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SavedMatch"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_match_api_matches__match_id__get: {
         parameters: {
             query?: never;
@@ -1931,6 +2086,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RequeueResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    skill_gaps_api_insights_skill_gaps_get: {
+        parameters: {
+            query?: {
+                profile_id?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillGapReport"];
                 };
             };
             /** @description Validation Error */
