@@ -31,6 +31,7 @@ from app.db import SessionLocal
 from app.embeddings import cosine_similarity, embed_text
 from app.extraction import POSTING_EXTRACTION_VERSION, PROFILE_EXTRACTION_VERSION
 from app.models import (
+    MAX_CONSECUTIVE_FAILURES,
     IngestJob,
     JobPosting,
     Match,
@@ -67,6 +68,10 @@ logger = logging.getLogger(__name__)
 # in a text column is a slow way to fill a disk, and the first 2000 characters
 # carry the exception type and message, which is what a human actually reads.
 MAX_ERROR_CHARS = 2000
+
+# A crawl enumerates a whole board and may fan out hundreds of postings.
+# The shared JOB_TIMEOUT is sized for a single fetch, which this is not.
+DISCOVER_TIMEOUT = 900
 
 
 @contextmanager
@@ -256,6 +261,7 @@ def process_job_url(job_id: int) -> str:
 
         url = job.url
         attempts = job.attempts
+        source_id = job.source_id
 
     logger.info("process_job_url: job %s attempt %s -> %s", job_id, attempts, url)
 
@@ -287,7 +293,7 @@ def process_job_url(job_id: int) -> str:
         )
         return "no_content"
 
-    posting_id = _upsert_posting(url, raw_text)
+    posting_id = _upsert_posting(url, raw_text, source_id=source_id)
 
     with _session() as db:
         job = db.get(IngestJob, job_id)
@@ -355,13 +361,20 @@ def _enqueue_scoring(profile_id: int, posting_id: int) -> None:
         )
 
 
-def _upsert_posting(url: str, raw_text: str) -> int:
+def _upsert_posting(url: str, raw_text: str, source_id: int | None = None) -> int:
     """Store the fetched text as a JobPosting, keyed on canonical_key.
 
     ON CONFLICT DO UPDATE rather than a check-then-insert. The check races --
     two workers fetching the same posting both read "absent" and both insert
     -- and under at-least-once delivery a replay is normal operation rather
     than an edge case, so the database has to be the thing that decides.
+
+    `source_id` is carried in from the job that produced this fetch, and is
+    NULL only for a user-submitted one-off URL. Losing it is not cosmetic:
+    closure detection scans `WHERE source_id = :source_id`, so a posting that
+    arrived through a crawl but stored NULL can never be tombstoned -- the
+    board stops listing it, the crawl completes successfully, and the dead
+    posting stays in every feed forever.
 
     `last_seen_at` is bumped on every pass, including one where the text is
     byte-identical. That heartbeat is what closure detection reads at M8:
@@ -385,6 +398,7 @@ def _upsert_posting(url: str, raw_text: str) -> int:
             .values(
                 canonical_key=key,
                 url=url,
+                source_id=source_id,
                 content_hash=content_hash,
                 raw_text=raw_text,
             )
@@ -392,6 +406,14 @@ def _upsert_posting(url: str, raw_text: str) -> int:
                 index_elements=["canonical_key"],
                 set_={
                     "url": url,
+                    # COALESCE so a user submitting a URL that the crawler
+                    # already owns does not orphan it from its board. A
+                    # user-submitted fetch carries no source and must not
+                    # erase one.
+                    "source_id": func.coalesce(
+                        pg_insert(JobPosting).excluded.source_id,
+                        JobPosting.source_id,
+                    ),
                     "content_hash": content_hash,
                     "raw_text": raw_text,
                     "last_seen_at": func.now(),
@@ -743,6 +765,84 @@ def discover_source(source_id: int) -> str:
     return "discovered"
 
 
+def tick_sources() -> str:
+    """Enqueue a crawl for every source whose interval has elapsed.
+
+    The caller `discover_source` never had. One tick reads which boards are
+    due and fans out; it does not crawl anything itself, so a slow board
+    cannot delay the decision to crawl the others.
+
+    **Due is computed in SQL, not in Python.** `last_crawled_at` is stamped
+    with Postgres's `now()`, so comparing it against a worker's clock is the
+    same defect that made closure detection tombstone live boards -- see
+    `discover_source`. Keeping both sides in the database means the comparison
+    cannot drift, and it lets the partial index on `enabled` do the work.
+
+    **Stamped-on-attempt is what makes this safe to run often.** Because
+    `discover_source` writes `last_crawled_at` before enumerating, a board
+    that is mid-crawl is no longer due, so a tick arriving while the previous
+    crawl is still running does not queue a second one. The interval is
+    therefore a floor on crawl spacing rather than a promise of it, which is
+    the correct guarantee to give somebody else's server.
+
+    Circuit-open sources are skipped here as well as inside `discover_source`.
+    The inner check is the authority; this one exists so a broken board does
+    not occupy the queue with jobs whose only outcome is to return
+    "circuit_open".
+    """
+    from app.queues import QUEUE_DISCOVERY
+
+    with _session() as db:
+        # Raw SQL because the predicate is an interval built from a column,
+        # which the ORM expresses far less legibly than Postgres does. This is
+        # the query `ix_sources_due` was created for.
+        #
+        # NULLS FIRST is not cosmetic: a source that has never been crawled is
+        # the most overdue thing in the table, and default ordering would put
+        # it last.
+        due = db.execute(
+            text(
+                """
+                SELECT id, kind, board_token
+                  FROM sources
+                 WHERE enabled
+                   AND consecutive_failures < :max_failures
+                   AND (
+                        last_crawled_at IS NULL
+                     OR last_crawled_at
+                        < now() - make_interval(secs => crawl_interval_seconds)
+                   )
+                 ORDER BY last_crawled_at ASC NULLS FIRST
+                """
+            ),
+            {"max_failures": MAX_CONSECUTIVE_FAILURES},
+        ).all()
+
+    if not due:
+        logger.debug("tick_sources: nothing due")
+        return "none_due"
+
+    queued = 0
+    for source_id, kind, token in due:
+        try:
+            get_queue(QUEUE_DISCOVERY).enqueue(
+                "app.workers.tasks.discover_source",
+                source_id,
+                job_timeout=DISCOVER_TIMEOUT,
+                result_ttl=RESULT_TTL,
+                failure_ttl=FAILURE_TTL,
+            )
+            queued += 1
+            logger.info("tick_sources: queued %s:%s", kind, token)
+        except Exception as exc:
+            # One board failing to enqueue must not cost the others their
+            # tick. The next tick will find it due again -- nothing was
+            # stamped, because stamping happens inside discover_source.
+            logger.error("tick_sources: could not queue source %s: %s", source_id, exc)
+
+    return f"queued {queued}"
+
+
 def _record_source_failure(source_id: int, exc: Exception) -> None:
     """Count a failed crawl toward the circuit breaker."""
     with _session() as db:
@@ -909,7 +1009,7 @@ def _enqueue_posting_fetch(
         return False
 
     try:
-        get_queue(QUEUE_INGEST).enqueue(
+        rq_job = get_queue(QUEUE_INGEST).enqueue(
             "app.workers.tasks.process_job_url",
             job_id,
             retry=Retry(max=MAX_RETRIES, interval=retry_intervals()),
@@ -917,6 +1017,18 @@ def _enqueue_posting_fetch(
             result_ttl=RESULT_TTL,
             failure_ttl=FAILURE_TTL,
         )
+        # Written back, as every other producer here does. Without it the row
+        # says `queued` with a null rq_job_id, which is exactly the signature
+        # a requeue sweep uses to find work whose enqueue failed -- so a
+        # perfectly healthy fan-out of 399 jobs would read as 399 orphans,
+        # and the sweep would re-enqueue every one of them.
+        with _session() as db:
+            db.execute(
+                update(IngestJob)
+                .where(IngestJob.id == job_id)
+                .values(rq_job_id=rq_job.id)
+            )
+            db.commit()
     except Exception as exc:
         logger.error("discover_source: could not enqueue fetch for %s: %s", posting.url, exc)
     return True

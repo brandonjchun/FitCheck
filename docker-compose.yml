@@ -88,6 +88,7 @@ services:
       context: ./backend
     command: >
       rq worker --url redis://:${REDIS_PASSWORD}@redis:6379/0
+      --worker-class app.workers.runner.LoggingWorker
       interactive scoring ingest
     depends_on:
       # Wait for readiness, not just "container started". Postgres accepts
@@ -153,7 +154,42 @@ services:
     #   docker compose up -d --scale worker-bulk=4
     command: >
       rq worker --url redis://:${REDIS_PASSWORD}@redis:6379/0
+      --worker-class app.workers.runner.LoggingWorker
       ingest
+
+  worker-discovery:
+    # Drains `discovery`, which until M8's scheduler landed had no producer
+    # and therefore no consumer either.
+    #
+    # Its own service rather than another queue on worker-bulk, for the reason
+    # the four queues exist at all: one crawl tick enumerates a whole board and
+    # can run for minutes, and sharing a process with `ingest` would mean the
+    # fan-out that crawl just produced waits behind the crawl that produced it.
+    # Separating them lets the postings start being fetched while later boards
+    # are still being enumerated.
+    #
+    # One process is deliberate. Scaling this is how you crawl several boards
+    # at once, which is rarely what you want -- politeness is per-domain and
+    # the token bucket is shared, so more crawlers mostly means more waiting.
+    <<: *worker
+    command: >
+      rq worker --url redis://:${REDIS_PASSWORD}@redis:6379/0
+      --worker-class app.workers.runner.LoggingWorker
+      discovery
+
+  scheduler:
+    # The process that decides when a board is due. Closes D-060: before this,
+    # `discover_source` was complete and tested and had no caller, so Path B
+    # only ran when somebody typed a command.
+    #
+    # Exactly one replica, and that is load-bearing rather than incidental.
+    # Two schedulers would double every crawl rate -- not visibly, because
+    # both would be behaving correctly. `deploy.replicas` is not enforced by
+    # `docker compose up`, so this is guarded by the process itself being
+    # cheap to reason about: it holds no state, and the interval is enforced
+    # in the database via `last_crawled_at`.
+    <<: *worker
+    command: python scripts/scheduler.py
 
 volumes:
   pgdata:

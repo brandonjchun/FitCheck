@@ -53,6 +53,71 @@ SKILL_ALIASES: dict[str, str] = {
 }
 
 
+# Things a posting asks for that are not skills.
+#
+# Dropped on read rather than filtered at extraction, for the same reason
+# aliases are applied on read: it makes the fix retroactive across every
+# posting already stored, with no re-extraction and no LLM cost.
+#
+# **Why this exists at all.** The posting prompt already says to skip these,
+# and Gemini obeys it. The local model that extracts the catalog in bulk
+# does not, reliably -- a real Spotify sales posting came back with
+# `Integrity` and `Work-life balance` as required skills. Those are the same
+# failure as the `"Automated test coverage"` case: no resume can ever match
+# them, so they sit in `missing_required` permanently and drag every
+# candidate's denominator down. The difference is that one was fixable by
+# prompting and this one is not, because the instruction is simply not
+# followed often enough.
+#
+# Deliberately small and hand-maintained, on the same terms as the alias map:
+# every entry is a claim that a string is never a skill, and a claim that is
+# sometimes wrong is worse than a short list. `Communication` and
+# `Leadership` are borderline and stay OUT -- they are real, assessable
+# things that a resume can evidence, and dropping them would understate
+# genuinely people-heavy roles.
+NON_SKILLS: frozenset[str] = frozenset(
+    {
+        "integrity",
+        "work-life balance",
+        "work life balance",
+        "growth mindset",
+        "attention to detail",
+        "team player",
+        "self-starter",
+        "hard working",
+        "hard-working",
+        "passion",
+        "passionate",
+        "enthusiasm",
+        "curiosity",
+        "empathy",
+        "positive attitude",
+        "fast-paced environment",
+        "fast paced environment",
+        "willingness to learn",
+        "eagerness to learn",
+        "adaptability",
+        "flexibility",
+        "professionalism",
+        "reliability",
+        "accountability",
+        "diversity",
+        "inclusion",
+        "culture fit",
+        "equal opportunity",
+    }
+)
+
+
+def is_skill(name: str) -> bool:
+    """Whether `name` names something a resume could actually evidence.
+
+    False for the qualities in NON_SKILLS. Comparison is on the stripped,
+    lowercased form, so "Integrity " and "INTEGRITY" are both caught.
+    """
+    return name.strip().lower() not in NON_SKILLS
+
+
 def normalize_skill(name: str) -> str:
     """Return the canonical name for a skill.
 
@@ -123,7 +188,13 @@ def normalize_skill_items(items: list[dict]) -> list[dict]:
     result: list[dict] = []
 
     for item in items:
-        canonical = normalize_skill(item.get("name", ""))
+        raw = item.get("name", "")
+        if not is_skill(raw):
+            # A quality rather than a skill. Counting it would put a
+            # requirement in the denominator that no candidate can ever
+            # satisfy.
+            continue
+        canonical = normalize_skill(raw)
         if not canonical or canonical in seen:
             continue
         seen.add(canonical)

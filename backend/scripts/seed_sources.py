@@ -32,14 +32,21 @@ from app.models import Source
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger("seed_sources")
 
-# Verified reachable and robots-allowed on 2026-08-03. Counts are what the
-# board returned that day and will drift.
+# Verified reachable and robots-allowed on 2026-08-03, and re-verified as
+# *non-empty* -- an earlier list included `lever/plaid`, which answers 200
+# with zero postings. That is worth calling out because it fails silently:
+# the crawl succeeds, closure detection correctly closes nothing, and the
+# board simply never contributes. Only the posting count gives it away.
+#
+# Sized against spec section 10.1's 300-800 target. `lever/gopuff` was
+# rejected for having 807 postings on its own, which would make one company
+# the entire catalog.
 SOURCES = [
     # Inline content -- one request each, no per-posting fetching.
     ("lever", "spotify", "Spotify", 86400),
     ("ashby", "ashby", "Ashby", 86400),
-    ("lever", "plaid", "Plaid", 86400),
     ("ashby", "ramp", "Ramp", 86400),
+    ("ashby", "vanta", "Vanta", 86400),
     # No inline content, but publishes `updated_at`, so a re-crawl fetches
     # only what changed. The first crawl is the expensive one.
     ("greenhouse", "anthropic", "Anthropic", 86400),
