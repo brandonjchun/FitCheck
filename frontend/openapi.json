@@ -814,6 +814,72 @@
         }
       }
     },
+    "/api/matches/saved": {
+      "get": {
+        "tags": [
+          "matches"
+        ],
+        "summary": "Saved Matches",
+        "description": "Everything the caller reacted to, most recent reaction first.\n\nDeclared *before* `/{match_id}`, and that ordering is load-bearing:\nFastAPI matches routes in declaration order, so the other way round this\npath would be captured by the id route and answered with a 422 about\n\"saved\" not being an integer.\n\n**One row per match, not one per verdict.** `match_feedback` is\nappend-only, so a posting marked interested and later applied has two\nrows; this is a tracker, and a tracker showing the same job twice at two\nstages is a worse tracker. `DISTINCT ON` takes the newest per match, which\nis the current state -- while the history stays intact underneath for the\nranking model that would eventually read it.",
+        "operationId": "saved_matches_api_matches_saved_get",
+        "parameters": [
+          {
+            "name": "verdict",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Verdict"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SavedMatch"
+                  },
+                  "title": "Response Saved Matches Api Matches Saved Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/matches/{match_id}": {
       "get": {
         "tags": [
@@ -1049,6 +1115,56 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RequeueResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/insights/skill-gaps": {
+      "get": {
+        "tags": [
+          "insights"
+        ],
+        "summary": "Skill Gaps",
+        "description": "The requirements this user fails most often, across their matches.\n\nScoped to the caller's own profiles by joining through `profiles` on\n`user_id`, not by filtering afterwards -- the same structural approach the\nmatch endpoints use, so there is no version of this query that can read\nsomebody else's feed.\n\n`profile_id` is optional. Omitted, it aggregates across every resume the\nuser has, which is the more interesting view: a gap that shows up under\nall of them is a gap in the person rather than in one document.",
+        "operationId": "skill_gaps_api_insights_skill_gaps_get",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SkillGapReport"
                 }
               }
             }
@@ -2074,6 +2190,150 @@
           "queue"
         ],
         "title": "RequeueResponse"
+      },
+      "SavedMatch": {
+        "properties": {
+          "match_id": {
+            "type": "integer",
+            "title": "Match Id"
+          },
+          "profile_id": {
+            "type": "integer",
+            "title": "Profile Id"
+          },
+          "job_posting_id": {
+            "type": "integer",
+            "title": "Job Posting Id"
+          },
+          "final_score": {
+            "type": "number",
+            "title": "Final Score"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict"
+          },
+          "verdict_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Verdict At"
+          },
+          "posting_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Url"
+          },
+          "posting_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Title"
+          },
+          "posting_company": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Company"
+          },
+          "posting_closed": {
+            "type": "boolean",
+            "title": "Posting Closed",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "match_id",
+          "profile_id",
+          "job_posting_id",
+          "final_score",
+          "verdict",
+          "verdict_at"
+        ],
+        "title": "SavedMatch",
+        "description": "A match the user reacted to, with the reaction attached."
+      },
+      "SkillGap": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "missing": {
+            "type": "integer",
+            "title": "Missing"
+          },
+          "partial": {
+            "type": "integer",
+            "title": "Partial"
+          },
+          "matched": {
+            "type": "integer",
+            "title": "Matched"
+          },
+          "blocking": {
+            "type": "integer",
+            "title": "Blocking"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "missing",
+          "partial",
+          "matched",
+          "blocking"
+        ],
+        "title": "SkillGap",
+        "description": "How one requirement fared across a user's whole feed.\n\nAll four buckets travel together rather than just the bad news, because\nthe ratio is the point: \"missing in 3 of 40\" is noise and \"missing in 30\nof 40\" is the next thing to learn, and the raw count alone cannot tell\nthose apart."
+      },
+      "SkillGapReport": {
+        "properties": {
+          "profile_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Id"
+          },
+          "matches_analyzed": {
+            "type": "integer",
+            "title": "Matches Analyzed"
+          },
+          "gaps": {
+            "items": {
+              "$ref": "#/components/schemas/SkillGap"
+            },
+            "type": "array",
+            "title": "Gaps"
+          }
+        },
+        "type": "object",
+        "required": [
+          "matches_analyzed",
+          "gaps"
+        ],
+        "title": "SkillGapReport"
       },
       "SourceFreshness": {
         "properties": {

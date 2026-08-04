@@ -356,3 +356,163 @@ class TestFeedback:
             db.close()
 
         assert remaining == []
+
+
+class TestSavedMatches:
+    def test_returns_only_matches_the_caller_reacted_to(self, feed):
+        client.post(
+            f"/api/matches/{feed['matches']['rec']}/feedback",
+            json={"verdict": "interested"},
+        )
+
+        rows = client.get("/api/matches/saved").json()
+        ids = {r["match_id"] for r in rows}
+
+        assert feed["matches"]["rec"] in ids
+        assert feed["matches"]["sub"] not in ids, "no verdict means not saved"
+
+    def test_shows_the_latest_verdict_not_every_one(self, feed):
+        """A tracker showing the same job twice at two stages is a worse tracker.
+
+        The history stays intact underneath -- see test_is_append_only -- this
+        is only about what the current-state view shows.
+        """
+        match_id = feed["matches"]["rec"]
+        client.post(f"/api/matches/{match_id}/feedback", json={"verdict": "interested"})
+        client.post(f"/api/matches/{match_id}/feedback", json={"verdict": "applied"})
+
+        rows = [r for r in client.get("/api/matches/saved").json()
+                if r["match_id"] == match_id]
+
+        assert len(rows) == 1
+        assert rows[0]["verdict"] == "applied"
+
+    def test_filters_by_verdict(self, feed):
+        client.post(
+            f"/api/matches/{feed['matches']['rec']}/feedback",
+            json={"verdict": "applied"},
+        )
+        client.post(
+            f"/api/matches/{feed['matches']['sub']}/feedback",
+            json={"verdict": "not_interested"},
+        )
+
+        applied = client.get("/api/matches/saved", params={"verdict": "applied"}).json()
+        ids = {r["match_id"] for r in applied}
+
+        assert feed["matches"]["rec"] in ids
+        assert feed["matches"]["sub"] not in ids
+
+    def test_unknown_verdict_is_rejected(self, feed):
+        response = client.get("/api/matches/saved", params={"verdict": "nonsense"})
+        assert response.status_code == 422
+
+    def test_a_closed_posting_is_flagged_rather_than_hidden(self, feed):
+        """You applied to it; it is still part of your history.
+
+        Hiding it would make an application vanish from the tracker, which is
+        worse than showing it marked as filled.
+        """
+        match_id = feed["matches"]["closed"]
+        client.post(f"/api/matches/{match_id}/feedback", json={"verdict": "applied"})
+
+        rows = [r for r in client.get("/api/matches/saved").json()
+                if r["match_id"] == match_id]
+
+        assert rows and rows[0]["posting_closed"] is True
+
+    def test_another_users_reactions_are_not_visible(self, feed, make_user, as_user):
+        client.post(
+            f"/api/matches/{feed['matches']['rec']}/feedback",
+            json={"verdict": "interested"},
+        )
+
+        as_user(make_user())
+        rows = client.get("/api/matches/saved").json()
+
+        assert all(r["match_id"] != feed["matches"]["rec"] for r in rows)
+
+
+class TestSkillGaps:
+    def _with_breakdown(self, feed, key, skills):
+        db = SessionLocal()
+        try:
+            match = db.get(Match, feed["matches"][key])
+            match.breakdown = {"skills": skills, "counts": {}, "weights": {}}
+            db.commit()
+        finally:
+            db.close()
+
+    def test_ranks_blocking_gaps_first(self, feed):
+        """A missing *required* skill is what actually disqualifies.
+
+        Ranking by raw missing count would let a widely-listed nice-to-have
+        outrank the requirement that is costing the candidate the job.
+        """
+        common_optional = {
+            "name": "Kubernetes",
+            "bucket": "missing",
+            "necessity": "preferred",
+        }
+        blocker = {"name": "Rust", "bucket": "missing", "necessity": "required"}
+
+        self._with_breakdown(feed, "rec", [common_optional, blocker])
+        self._with_breakdown(feed, "sub", [common_optional])
+        self._with_breakdown(feed, "unstated", [common_optional])
+
+        report = client.get(
+            "/api/insights/skill-gaps",
+            params={"profile_id": feed["profile_id"]},
+        ).json()
+
+        names = [g["name"] for g in report["gaps"]]
+        assert names[0] == "Rust", "the blocking requirement must rank first"
+        assert "Kubernetes" in names
+
+    def test_counts_every_bucket(self, feed):
+        self._with_breakdown(feed, "rec", [
+            {"name": "Go", "bucket": "missing", "necessity": "required"},
+        ])
+        self._with_breakdown(feed, "sub", [
+            {"name": "Go", "bucket": "partial", "necessity": "required"},
+        ])
+        self._with_breakdown(feed, "unstated", [
+            {"name": "Go", "bucket": "matched", "necessity": "required"},
+        ])
+
+        report = client.get(
+            "/api/insights/skill-gaps",
+            params={"profile_id": feed["profile_id"]},
+        ).json()
+        go = [g for g in report["gaps"] if g["name"] == "Go"][0]
+
+        assert (go["missing"], go["partial"], go["matched"]) == (1, 1, 1)
+
+    def test_a_fully_satisfied_skill_is_not_a_gap(self, feed):
+        self._with_breakdown(feed, "rec", [
+            {"name": "Python", "bucket": "matched", "necessity": "required"},
+        ])
+        self._with_breakdown(feed, "sub", [])
+        self._with_breakdown(feed, "unstated", [])
+
+        report = client.get(
+            "/api/insights/skill-gaps",
+            params={"profile_id": feed["profile_id"]},
+        ).json()
+
+        assert all(g["name"] != "Python" for g in report["gaps"])
+
+    def test_reports_the_denominator(self, feed):
+        """"Missing in 9" is unreadable without knowing 9 out of what."""
+        report = client.get(
+            "/api/insights/skill-gaps",
+            params={"profile_id": feed["profile_id"]},
+        ).json()
+        assert report["matches_analyzed"] == 4
+
+    def test_another_users_profile_is_404(self, feed, make_user, as_user):
+        as_user(make_user())
+        response = client.get(
+            "/api/insights/skill-gaps", params={"profile_id": feed["profile_id"]}
+        )
+        assert response.status_code == 404

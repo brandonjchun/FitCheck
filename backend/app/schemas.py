@@ -440,6 +440,48 @@ class RecommendationRun(BaseModel):
     queued: bool
 
 
+class SkillGap(BaseModel):
+    """How one requirement fared across a user's whole feed.
+
+    All four buckets travel together rather than just the bad news, because
+    the ratio is the point: "missing in 3 of 40" is noise and "missing in 30
+    of 40" is the next thing to learn, and the raw count alone cannot tell
+    those apart.
+    """
+
+    name: str
+    missing: int
+    partial: int
+    matched: int
+    # Missing *and* listed as required -- the subset that actually
+    # disqualifies, which is what the ranking is by.
+    blocking: int
+
+
+class SkillGapReport(BaseModel):
+    profile_id: int | None = None
+    matches_analyzed: int
+    gaps: list[SkillGap]
+
+
+class SavedMatch(BaseModel):
+    """A match the user reacted to, with the reaction attached."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    match_id: int
+    profile_id: int
+    job_posting_id: int
+    final_score: float
+    verdict: str
+    verdict_at: datetime
+
+    posting_url: str | None = None
+    posting_title: str | None = None
+    posting_company: str | None = None
+    posting_closed: bool = False
+
+
 class FeedbackCreate(BaseModel):
     """A user's judgment on one recommendation.
 

@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.logging_setup import configure_logging
 from app.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
-from app.routers import auth, batches, jobs, matches, ops, profiles
+from app.routers import auth, batches, insights, jobs, matches, ops, profiles
 
 # Before the app object exists, so that anything logged during router import
 # is already formatted. Configuring inside a startup hook would leave import
@@ -75,3 +75,4 @@ app.include_router(jobs.router)
 app.include_router(batches.router)
 app.include_router(matches.router)
 app.include_router(ops.router)
+app.include_router(insights.router)

@@ -13,17 +13,18 @@ expose one person's resume analysis to anyone who could guess an integer.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.models import JobPosting, Match, MatchFeedback, Profile, User
+from app.models import VERDICTS, JobPosting, Match, MatchFeedback, Profile, User
 from app.queues import FAILURE_TTL, QUEUE_SCORING, RESULT_TTL, get_queue
 from app.schemas import (
     FeedbackCreate,
     FeedbackResponse,
     MatchResponse,
     RecommendationRun,
+    SavedMatch,
 )
 from app.scoring import SCORER_VERSION
 from app.security import current_user
@@ -171,6 +172,83 @@ def list_matches(
     response.headers["Cache-Control"] = "no-store"
 
     return [_to_response(match, posting) for match, posting in rows]
+
+
+@router.get("/saved", response_model=list[SavedMatch])
+def saved_matches(
+    response: Response,
+    verdict: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=MAX_LIMIT),
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> list[SavedMatch]:
+    """Everything the caller reacted to, most recent reaction first.
+
+    Declared *before* `/{match_id}`, and that ordering is load-bearing:
+    FastAPI matches routes in declaration order, so the other way round this
+    path would be captured by the id route and answered with a 422 about
+    "saved" not being an integer.
+
+    **One row per match, not one per verdict.** `match_feedback` is
+    append-only, so a posting marked interested and later applied has two
+    rows; this is a tracker, and a tracker showing the same job twice at two
+    stages is a worse tracker. `DISTINCT ON` takes the newest per match, which
+    is the current state -- while the history stays intact underneath for the
+    ranking model that would eventually read it.
+    """
+    if verdict is not None and verdict not in VERDICTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"verdict must be one of {', '.join(sorted(VERDICTS))}",
+        )
+
+    rows = db.execute(
+        text(
+            """
+            SELECT DISTINCT ON (f.match_id)
+                   f.match_id,
+                   f.verdict,
+                   f.created_at AS verdict_at,
+                   m.profile_id,
+                   m.job_posting_id,
+                   m.final_score,
+                   j.url        AS posting_url,
+                   j.title      AS posting_title,
+                   j.company    AS posting_company,
+                   (j.closed_at IS NOT NULL) AS posting_closed
+              FROM match_feedback f
+              JOIN matches  m ON m.id = f.match_id
+              JOIN profiles p ON p.id = m.profile_id
+              JOIN job_postings j ON j.id = m.job_posting_id
+             WHERE p.user_id = :user_id
+               AND (CAST(:verdict AS text) IS NULL OR f.verdict = CAST(:verdict AS text))
+             ORDER BY f.match_id, f.created_at DESC
+            """
+        ),
+        {"user_id": user.id, "verdict": verdict},
+    ).all()
+
+    # Sorted in Python because DISTINCT ON dictates its own leading ORDER BY,
+    # and wrapping it in an outer query to re-sort would be more SQL for a
+    # list already capped at MAX_LIMIT.
+    ordered = sorted(rows, key=lambda r: r.verdict_at, reverse=True)[:limit]
+
+    response.headers["Cache-Control"] = "no-store"
+    return [
+        SavedMatch(
+            match_id=r.match_id,
+            profile_id=r.profile_id,
+            job_posting_id=r.job_posting_id,
+            final_score=r.final_score,
+            verdict=r.verdict,
+            verdict_at=r.verdict_at,
+            posting_url=r.posting_url,
+            posting_title=r.posting_title,
+            posting_company=r.posting_company,
+            posting_closed=r.posting_closed,
+        )
+        for r in ordered
+    ]
 
 
 @router.get("/{match_id}", response_model=MatchResponse)
