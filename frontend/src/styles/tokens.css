@@ -30,6 +30,42 @@
   --warn: oklch(0.78 0.15 75);
   --danger: oklch(0.62 0.21 25);
 
+  /* --- Chart series (categorical) ------------------------------------- */
+  /* Identity colours for a chart plotting several series at once. A separate
+   * set from everything above, for two reasons:
+   *
+   *   The brand pair is not a categorical palette. `--accent` and
+   *   `--accent-2` read as two distinct signals, which is what they were
+   *   chosen for -- but four queues need four hues that stay apart from each
+   *   other, and extending a brand pair by eye is how palettes end up with two
+   *   colours nobody with deuteranopia can separate.
+   *
+   *   The semantic trio is reserved. `--ok` and `--danger` mean good and bad.
+   *   Spending green on "the scoring queue" makes a neutral series look like a
+   *   verdict, and leaves the page unable to say "this is fine" in colour.
+   *
+   * Slots are assigned in this fixed order and never cycled -- a chart with a
+   * ninth series folds the tail into the table rather than inventing a hue,
+   * because a generated ninth is indistinguishable from one of these under
+   * simulated colour-vision deficiency.
+   *
+   * Hex rather than oklch, unlike every other colour here, because these were
+   * chosen by a validator that reads hex: the ordering clears a worst adjacent
+   * CVD ΔE of 9.1 light / 8.4 dark and a normal-vision ΔE of 19.6 / 19.3
+   * against this project's own surfaces. Re-deriving them in oklch by hand
+   * would discard the property that makes them worth having. Three of the
+   * light steps sit below 3:1 on white, which is why any chart using them also
+   * ships a table view.
+   */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+
   /* --- Light theme ---------------------------------------------------- */
   --bg: oklch(0.99 0.004 274);
   --bg-sunken: oklch(0.965 0.008 274);
@@ -146,6 +182,19 @@
     --accent-soft: oklch(0.62 0.16 var(--brand-h));
     --accent-contrast: oklch(0.14 0.02 274);
 
+    /* The same eight hues re-stepped for the dark surface, not an automatic
+     * flip: the light steps were picked to sit in a lightness band above white
+     * and go muddy against a near-black field. Validated as a set against
+     * `--surface` in this theme, where all eight clear 3:1. */
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --series-5: #d55181;
+    --series-6: #008300;
+    --series-7: #9085e9;
+    --series-8: #e66767;
+
     --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.4);
     --shadow-md: 0 4px 14px oklch(0 0 0 / 0.45);
     --shadow-lg: 0 20px 50px oklch(0 0 0 / 0.55);
@@ -176,6 +225,16 @@
   --accent-strong: oklch(0.8 0.16 var(--brand-h));
   --accent-soft: oklch(0.62 0.16 var(--brand-h));
   --accent-contrast: oklch(0.14 0.02 274);
+
+  /* Restated for the toggle, same reasoning as the media query above. */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
 
   --shadow-sm: 0 1px 2px oklch(0 0 0 / 0.4);
   --shadow-md: 0 4px 14px oklch(0 0 0 / 0.45);

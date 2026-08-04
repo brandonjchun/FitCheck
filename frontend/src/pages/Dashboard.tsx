@@ -8,6 +8,12 @@ import {
   type SourceFreshness,
   type WorkerInfo,
 } from "../api/client";
+import { QueueDepthChart, QueueSparkline } from "../components/QueueDepthChart";
+import {
+  trendFor,
+  useDepthHistory,
+  useSeriesSlots,
+} from "../hooks/useQueueHistory";
 import { useMe } from "../hooks/useAuth";
 import "./Dashboard.css";
 
@@ -59,7 +65,15 @@ function verdictFor(q: QueueHealth): QueueVerdict {
   return { tone: "idle", label: "Idle" };
 }
 
-function QueueCard({ queue }: { queue: QueueHealth }) {
+function QueueCard({
+  queue,
+  trend,
+  slot,
+}: {
+  queue: QueueHealth;
+  trend: number[];
+  slot: number | undefined;
+}) {
   const verdict = verdictFor(queue);
 
   return (
@@ -76,6 +90,12 @@ function QueueCard({ queue }: { queue: QueueHealth }) {
         <span className="depth-value">{queue.depth}</span>
         <span className="depth-label">waiting</span>
       </div>
+
+      {/* Scaled to this queue's own peak, which is the point: on the shared
+        * axis above, a queue that tops out at 14 beside one at 400 is a flat
+        * line and shows no motion at all. The colour echoes that chart so the
+        * two views read as the same queue. */}
+      <QueueSparkline name={queue.name} values={trend} slot={slot} />
 
       <dl className="queue-registries">
         <div>
@@ -261,6 +281,17 @@ export function Dashboard() {
     enabled: isAdmin,
   });
 
+  // Accumulated from the poll above rather than fetched: the chart's window is
+  // only ever read by somebody watching the screen, so the samples the page
+  // already has are the source. Called before the early returns below because
+  // hooks cannot be conditional -- it no-ops while `overview.data` is
+  // undefined, which is exactly the non-admin case.
+  const history = useDepthHistory(overview.data?.queues, overview.dataUpdatedAt);
+
+  // One registry for both views, so a queue is the same colour in the chart and
+  // in its own card. Also called before the early returns, for the same reason.
+  const slots = useSeriesSlots(overview.data?.queues ?? []);
+
   if (authLoading) return null;
   if (!user) return <Navigate to="/signin" replace />;
 
@@ -353,9 +384,25 @@ export function Dashboard() {
 
             <section className="dash-section">
               <h2 className="dash-h2">Queues</h2>
+              {/* Chart above cards, both on screen at once, because they answer
+                * different questions: the chart says which way a queue is
+                * moving and how fast, the cards say what its registries and
+                * worker coverage are right now. A depth of 340 looks identical
+                * on a card whether it was 12 a minute ago or 900. */}
+              <QueueDepthChart
+                queues={data.queues}
+                samples={history}
+                pollMs={OPS_POLL_MS}
+                slots={slots}
+              />
               <ul className="queue-grid">
                 {data.queues.map((q) => (
-                  <QueueCard key={q.name} queue={q} />
+                  <QueueCard
+                    key={q.name}
+                    queue={q}
+                    trend={trendFor(q.name, history)}
+                    slot={slots.get(q.name)}
+                  />
                 ))}
               </ul>
             </section>
