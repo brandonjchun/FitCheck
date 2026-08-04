@@ -118,8 +118,15 @@ class TestClosureDetection:
         assert tasks.discover_source(source_id) == "discovered"
 
         rows = _postings_for(source_id)
-        still_listed = [r for r in rows.values() if "/a" in r.url]
-        dropped = [r for r in rows.values() if "/b" in r.url]
+        # endswith, not `in`. The board token is "acme", so `"/a" in url`
+        # matches ".../acme/b" as well -- both rows landed in `still_listed`
+        # and the assertion then turned on whichever one Postgres happened to
+        # return first. It passed for months and failed the moment unrelated
+        # rows changed the row order in the shared dev database.
+        still_listed = [r for r in rows.values() if r.url.endswith("/a")]
+        dropped = [r for r in rows.values() if r.url.endswith("/b")]
+
+        assert len(still_listed) == 1 and len(dropped) == 1
 
         assert still_listed[0].closed_at is None
         assert dropped[0].closed_at is not None, "a delisted posting must be tombstoned"

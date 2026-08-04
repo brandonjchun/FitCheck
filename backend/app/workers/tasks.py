@@ -49,6 +49,7 @@ from app.scoring import (
     build_breakdown,
     score_skills,
 )
+from app.seniority import seniority_from_title
 from app.workers.extract import extract_posting, extract_profile
 from app.queues import (
     FAILURE_TTL,
@@ -262,6 +263,10 @@ def process_job_url(job_id: int) -> str:
         url = job.url
         attempts = job.attempts
         source_id = job.source_id
+        # Carried from the crawl that created this row. See IngestJob.title:
+        # this is the only place the board's title survives to, and dropping it
+        # here is what left the feed full of "Untitled posting".
+        board_title = job.title
 
     logger.info("process_job_url: job %s attempt %s -> %s", job_id, attempts, url)
 
@@ -293,7 +298,7 @@ def process_job_url(job_id: int) -> str:
         )
         return "no_content"
 
-    posting_id = _upsert_posting(url, raw_text, source_id=source_id)
+    posting_id = _upsert_posting(url, raw_text, source_id=source_id, title=board_title)
 
     with _session() as db:
         job = db.get(IngestJob, job_id)
@@ -361,7 +366,12 @@ def _enqueue_scoring(profile_id: int, posting_id: int) -> None:
         )
 
 
-def _upsert_posting(url: str, raw_text: str, source_id: int | None = None) -> int:
+def _upsert_posting(
+    url: str,
+    raw_text: str,
+    source_id: int | None = None,
+    title: str | None = None,
+) -> int:
     """Store the fetched text as a JobPosting, keyed on canonical_key.
 
     ON CONFLICT DO UPDATE rather than a check-then-insert. The check races --
@@ -375,6 +385,13 @@ def _upsert_posting(url: str, raw_text: str, source_id: int | None = None) -> in
     arrived through a crawl but stored NULL can never be tombstoned -- the
     board stops listing it, the crawl completes successfully, and the dead
     posting stays in every feed forever.
+
+    `title` is the board's own, carried in from the job row, and NULL for a
+    user-submitted URL. Storing it here is what stops a crawled posting waiting
+    on the LLM to reinvent a string the board already stated -- which it
+    usually declines to do, leaving "Untitled posting" in the feed. It is
+    COALESCEd on conflict for the same reason `source_id` is: a user submitting
+    a URL the crawler already owns must not erase what the crawl knew.
 
     `last_seen_at` is bumped on every pass, including one where the text is
     byte-identical. That heartbeat is what closure detection reads at M8:
@@ -401,6 +418,7 @@ def _upsert_posting(url: str, raw_text: str, source_id: int | None = None) -> in
                 source_id=source_id,
                 content_hash=content_hash,
                 raw_text=raw_text,
+                title=title,
             )
             .on_conflict_do_update(
                 index_elements=["canonical_key"],
@@ -413,6 +431,15 @@ def _upsert_posting(url: str, raw_text: str, source_id: int | None = None) -> in
                     "source_id": func.coalesce(
                         pg_insert(JobPosting).excluded.source_id,
                         JobPosting.source_id,
+                    ),
+                    # Same shape, same reason. A re-crawl should follow a
+                    # renamed role, and this is also what repairs the rows an
+                    # earlier crawl stored with no title at all -- without
+                    # needing a migration to do it. The COALESCE is what keeps
+                    # a titleless user submission from undoing that.
+                    "title": func.coalesce(
+                        pg_insert(JobPosting).excluded.title,
+                        JobPosting.title,
                     ),
                     "content_hash": content_hash,
                     "raw_text": raw_text,
@@ -483,10 +510,11 @@ def _prepare_posting(posting_id: int) -> str | None:
         needs_extraction = not posting.extraction_is_current
         needs_embedding = posting.embedding is None
         raw_text = posting.raw_text
+        known_title = posting.title
 
     if needs_extraction:
         try:
-            extracted = extract_posting(raw_text)
+            extracted = extract_posting(raw_text, title=known_title)
         except LLMPermanentError as exc:
             logger.error("_prepare_posting: permanent failure for %s: %s", posting_id, exc)
             return "extraction_permanent_failure"
@@ -518,7 +546,20 @@ def _prepare_posting(posting_id: int) -> str | None:
                 posting.company = extracted.company or posting.company
                 posting.location = extracted.location or posting.location
                 posting.remote_type = extracted.remote_type or posting.remote_type
-                posting.seniority = extracted.seniority or posting.seniority
+                # The title wins where it states a level, and only there. A
+                # posting titled "Staff Engineer" is a staff role no matter
+                # what an 8B model made of the body -- and left to the model,
+                # 15 of them were filed as *junior*, which is how the feed's
+                # staff filter ended up returning 10 rows out of 1,587.
+                #
+                # Ordered after `posting.title` is settled, so the title being
+                # read is the one this commit stores rather than the one the
+                # row happened to arrive with.
+                posting.seniority = (
+                    seniority_from_title(posting.title)
+                    or extracted.seniority
+                    or posting.seniority
+                )
                 posting.min_years = (
                     extracted.min_years_experience
                     if extracted.min_years_experience is not None
@@ -967,6 +1008,16 @@ def _ingest_inline_posting(
             # nulled out can never get it back, since unchanged content means
             # this branch is the only one it will ever take again.
             existing.title = posting.title or existing.title
+            # Repaired alongside the title, and this is the half that makes the
+            # seniority fix land without waiting on a re-extraction. A gate hit
+            # means the content is unchanged, so there is no LLM call coming --
+            # and `seniority_from_title` needs no model, only the string that
+            # was just refreshed. Without this, a row the old extraction filed
+            # as "junior" would stay wrong for as long as the posting sits
+            # unedited on the board, which for a staff role is months.
+            existing.seniority = (
+                seniority_from_title(existing.title) or existing.seniority
+            )
             db.commit()
             _record_gate_hit(canonical_key, hit=True)
             return
@@ -1036,6 +1087,10 @@ def _enqueue_posting_fetch(
                 profile_id=None,
                 url=posting.url,
                 url_hash=hash_url(posting.url),
+                # The board's title, carried so the fetch can store it. The
+                # crawl is the only thing that ever sees this string, and a job
+                # row is the only thing that outlives the crawl.
+                title=posting.title,
                 status="queued",
             )
             .on_conflict_do_nothing(

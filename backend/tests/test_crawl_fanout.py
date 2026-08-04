@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from app.boards import DiscoveredPosting
 from app.db import SessionLocal
+from app.extraction import POSTING_EXTRACTION_VERSION
 from app.models import IngestJob, JobPosting, Source, canonical_key_for_url
 from app.workers import tasks
 
@@ -241,6 +242,94 @@ class TestSourceAttribution:
             db.close()
 
 
+class TestBoardTitleSurvivesTheFetch:
+    """The board knows every posting's title. The fetch path threw it away.
+
+    The same shape of bug as `TestSourceAttribution`, and found the same way --
+    by looking at the catalog rather than at the code. `discover_source` holds a
+    DiscoveredPosting with a title on it, and for a board with no inline content
+    the only thing that outlives the crawl is the ingest job row. That row
+    carried the URL and the source and nothing else, so `_upsert_posting`
+    inserted a posting with `title = NULL` and the column was left to the LLM,
+    which returns null for most postings.
+
+    Measured before the fix: 108 of 108 Greenhouse postings and 401 rows overall
+    rendering as "Untitled posting" in the feed.
+    """
+
+    def test_the_crawl_records_the_title_on_the_job(self, crawl, source_id) -> None:
+        crawl([_posting("1")], source_id)
+
+        db = SessionLocal()
+        try:
+            job = db.execute(
+                select(IngestJob).where(IngestJob.source_id == source_id)
+            ).scalar_one()
+            assert job.title == "Role 1"
+        finally:
+            db.close()
+
+    def test_the_fetch_stores_it_on_the_posting(self, monkeypatch, source_id) -> None:
+        """End to end across the enqueue boundary, which is where it was lost.
+
+        Driven through `process_job_url` rather than by calling
+        `_upsert_posting` directly, because the bug was never in the upsert --
+        it was in the caller having nothing to pass it.
+        """
+        monkeypatch.setattr(
+            tasks, "fetch_posting_text", lambda url: "Backend role. " * 30
+        )
+        monkeypatch.setattr(tasks, "_enqueue_scoring", lambda *a, **k: None)
+
+        crawl_posting = _posting("titled")
+        key = canonical_key_for_url(crawl_posting.url)
+        assert tasks._enqueue_posting_fetch(source_id, key, crawl_posting) is True
+
+        db = SessionLocal()
+        try:
+            job_id = db.execute(
+                select(IngestJob).where(IngestJob.source_id == source_id)
+            ).scalar_one().id
+        finally:
+            db.close()
+
+        assert tasks.process_job_url(job_id) == "fetched"
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(JobPosting.canonical_key == key)
+            ).scalar_one()
+            assert row.title == "Role titled"
+        finally:
+            db.close()
+
+    def test_a_titleless_user_submission_does_not_erase_it(self, source_id) -> None:
+        """The COALESCE, for the same reason `source_id` has one.
+
+        A user pasting a URL the crawler already owns arrives with no title.
+        Assigning that NULL on conflict would undo the repair on every posting a
+        second person happens to submit.
+        """
+        url = f"{BOARD}/shared-title"
+        tasks._upsert_posting(
+            url, "Original text. " * 30, source_id=source_id, title="Staff Engineer"
+        )
+
+        tasks._upsert_posting(url, "Updated text. " * 30, source_id=None, title=None)
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(
+                    JobPosting.canonical_key == canonical_key_for_url(url)
+                )
+            ).scalar_one()
+            assert row.title == "Staff Engineer"
+        finally:
+            db.close()
+
+
 class TestChangeDetection:
     def test_an_unchanged_posting_is_not_refetched(self, crawl, source_id) -> None:
         """The optimisation itself: 400 requests become a handful."""
@@ -440,7 +529,12 @@ class TestPromotedMetadata:
                 url="https://example.com/p",
                 content_hash="promote-hash",
                 raw_text="A description with no header line. " * 12,
-                title="Staff Backend Engineer",
+                # Deliberately states no level. The seniority assertion below
+                # is about the extraction's value surviving, and a title
+                # carrying "Staff" or "Senior" would be answered by
+                # seniority_from_title before the extraction was consulted --
+                # see TestSeniorityFromTitleWins for that half.
+                title="Backend Engineer, Payments",
                 company="Acme",
             )
             db.add(posting)
@@ -456,7 +550,7 @@ class TestPromotedMetadata:
             monkeypatch.setattr(
                 tasks,
                 "extract_posting",
-                lambda _text: SimpleNamespace(
+                lambda _text, title=None: SimpleNamespace(
                     title=None,
                     company=None,
                     location=None,
@@ -473,7 +567,7 @@ class TestPromotedMetadata:
             db = SessionLocal()
             try:
                 row = db.get(JobPosting, pid)
-                assert row.title == "Staff Backend Engineer"
+                assert row.title == "Backend Engineer, Payments"
                 assert row.company == "Acme"
                 # What the extraction *did* find still lands.
                 assert row.seniority == "senior"
@@ -486,3 +580,192 @@ class TestPromotedMetadata:
                 db.commit()
             finally:
                 db.close()
+
+
+class TestSeniorityFromTitleWins:
+    """A posting titled "Staff Engineer" must land as staff.
+
+    The failure this covers is not a crash, and it is not visible from any one
+    row -- it is a filter that looks functional and returns nothing. Measured
+    across the live catalog, of the postings whose title contains "staff":
+
+        unknown 34    junior 15    senior 4    staff 3
+
+    Fifteen "Staff Engineer" rows filed as *junior*, and 10 staff rows in a
+    catalog of 1,587. The extraction was shown the posting body and never the
+    title, so an 8B model was reconstructing a level from prose that does not
+    state one -- see app.seniority for why the title is authoritative instead.
+    """
+
+    @staticmethod
+    def _extraction(seniority: str):
+        from types import SimpleNamespace
+
+        return lambda _text, title=None: SimpleNamespace(
+            title=None,
+            company=None,
+            location=None,
+            remote_type=None,
+            seniority=seniority,
+            min_years_experience=None,
+            model_dump=lambda mode=None: {"skills": []},
+        )
+
+    @pytest.fixture
+    def posting(self):
+        """A posting carrying a board title, cleaned up afterwards."""
+
+        def make(title: str, seniority: str | None = None) -> int:
+            db = SessionLocal()
+            try:
+                row = JobPosting(
+                    canonical_key=f"seniority:{datetime.now(UTC).timestamp()}",
+                    url="https://example.com/p",
+                    content_hash="seniority-hash",
+                    raw_text="A description that never states a level. " * 12,
+                    title=title,
+                    seniority=seniority,
+                )
+                db.add(row)
+                db.commit()
+                db.refresh(row)
+                make.ids.append(row.id)
+                return row.id
+            finally:
+                db.close()
+
+        make.ids = []
+        yield make
+
+        db = SessionLocal()
+        try:
+            db.query(JobPosting).filter(JobPosting.id.in_(make.ids)).delete(
+                synchronize_session=False
+            )
+            db.commit()
+        finally:
+            db.close()
+
+    def test_a_staff_title_overrides_a_junior_extraction(
+        self, monkeypatch, posting
+    ) -> None:
+        """The exact production case: 15 rows landed here."""
+        pid = posting("Staff Software Engineer, iOS")
+        monkeypatch.setattr(tasks, "extract_posting", self._extraction("junior"))
+        monkeypatch.setattr(tasks, "embed_text", lambda _t: [0.0] * 384)
+
+        tasks._prepare_posting(pid)
+
+        db = SessionLocal()
+        try:
+            assert db.get(JobPosting, pid).seniority == "staff"
+        finally:
+            db.close()
+
+    def test_a_staff_title_overrides_unknown(self, monkeypatch, posting) -> None:
+        """The commonest case: 34 rows, and the one that empties the filter."""
+        pid = posting("Senior Staff Machine Learning Engineer, Content Platform")
+        monkeypatch.setattr(tasks, "extract_posting", self._extraction("unknown"))
+        monkeypatch.setattr(tasks, "embed_text", lambda _t: [0.0] * 384)
+
+        tasks._prepare_posting(pid)
+
+        db = SessionLocal()
+        try:
+            assert db.get(JobPosting, pid).seniority == "staff"
+        finally:
+            db.close()
+
+    def test_a_level_free_title_leaves_the_extraction_alone(
+        self, monkeypatch, posting
+    ) -> None:
+        """The override is narrow on purpose.
+
+        Most non-engineering ladders state no level in the title, and reading
+        one into its absence is the inference the deterministic path exists to
+        avoid. `seniority_from_title` returns None there, and None means defer.
+        """
+        pid = posting("Music Editor, Indonesia")
+        monkeypatch.setattr(tasks, "extract_posting", self._extraction("mid"))
+        monkeypatch.setattr(tasks, "embed_text", lambda _t: [0.0] * 384)
+
+        tasks._prepare_posting(pid)
+
+        db = SessionLocal()
+        try:
+            assert db.get(JobPosting, pid).seniority == "mid"
+        finally:
+            db.close()
+
+    def test_the_title_reaches_the_extraction_prompt(
+        self, monkeypatch, posting
+    ) -> None:
+        """Passing it is the fix for the titles the deterministic path skips.
+
+        The override handles "Staff" and "Senior". Everything else still comes
+        from the model, and the model cannot use a title it was never shown.
+        """
+        pid = posting("Music Editor, Indonesia")
+        seen: dict = {}
+
+        def spy(text, title=None):
+            seen["title"] = title
+            return self._extraction("mid")(text)
+
+        monkeypatch.setattr(tasks, "extract_posting", spy)
+        monkeypatch.setattr(tasks, "embed_text", lambda _t: [0.0] * 384)
+
+        tasks._prepare_posting(pid)
+
+        assert seen["title"] == "Music Editor, Indonesia"
+
+    def test_a_gate_hit_repairs_a_wrong_seniority(self, source_id) -> None:
+        """Without this, the fix waits on the board editing the posting.
+
+        A content-hash gate hit means no LLM call is coming, so a row the old
+        extraction filed as "junior" would stay wrong for as long as the posting
+        sits unedited -- which for a staff role is months. Deriving from the
+        title needs no model, only the string the gate hit already refreshes.
+        """
+        url = f"{BOARD}/gate-seniority"
+        key = canonical_key_for_url(url)
+        content = "Inline description text. " * 20
+
+        db = SessionLocal()
+        try:
+            db.add(
+                JobPosting(
+                    canonical_key=key,
+                    url=url,
+                    source_id=source_id,
+                    content_hash=tasks.content_hash_for(content),
+                    raw_text=content,
+                    title="Staff Platform Engineer - EU",
+                    seniority="junior",
+                    extracted={"skills": []},
+                    extraction_version=POSTING_EXTRACTION_VERSION,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        tasks._ingest_inline_posting(
+            source_id,
+            key,
+            DiscoveredPosting(
+                external_id="gate-seniority",
+                url=url,
+                title="Staff Platform Engineer - EU",
+                content=content,
+            ),
+        )
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(JobPosting.canonical_key == key)
+            ).scalar_one()
+            assert row.seniority == "staff"
+        finally:
+            db.close()

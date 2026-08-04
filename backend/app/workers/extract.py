@@ -194,8 +194,23 @@ not state one. Do not derive it from the seniority of the role.
 - `min_years_experience` is the role-level threshold, as in "3+ years of \
 professional software engineering". It is separate from any per-skill \
 number. Leave it null if the posting does not state one.
-- `seniority` reflects the scope of the role. Use "unknown" rather than \
-inferring it from a years requirement alone.
+- `title` is the role's title. When a KNOWN TITLE block is supplied below, \
+that is the board's own structured field -- return it verbatim rather than \
+re-deriving it from the page. Without one, take the title from the posting's \
+heading, and answer null only if the text states none.
+- `seniority` reflects the scope of the role. **Read it off the title \
+whenever the title states a level**, because most postings never restate the \
+level in the body:
+
+    Staff, Principal, Distinguished    -> "staff"
+    Senior, Sr., Snr                   -> "senior"
+    Junior, Jr., Intern, New Grad      -> "junior"
+
+  A title carrying a stronger level wins over a weaker one, so "Senior Staff \
+Machine Learning Engineer" is "staff", not "senior". When the title states no \
+level, use the scope the body describes. Only then does "unknown" apply, and \
+it is still the right answer rather than inferring a level from a years \
+requirement alone.
 - `remote_type` is "remote" only if the role can be performed fully \
 remotely. A role requiring any days on site is "hybrid". Use "unknown" when \
 the posting does not say -- most do not.
@@ -204,11 +219,23 @@ Return only the JSON object.\
 """
 
 
-def extract_posting(raw_text: str) -> ExtractedPosting:
+def extract_posting(raw_text: str, title: str | None = None) -> ExtractedPosting:
     """Extract structured requirements from a job posting's text.
 
     Args:
         raw_text: Readable text produced by fetch.html_to_text.
+        title: The board's own title for this posting, when there is one.
+            Supplied to the prompt rather than only stored beside it, because
+            it is the field the level is stated in. A posting body says
+            "you will own the reliability of our ingest pipeline" and never
+            says "staff"; the title says "Staff Data Engineer". Extracting
+            from the body alone left `seniority` to be guessed, and a local 8B
+            model guessed badly enough to empty the feed's staff filter -- see
+            app.seniority for the measurement.
+
+            Keyword-optional because Path A has no board behind it: a
+            user-submitted URL genuinely has no title until this call
+            produces one.
 
     Returns:
         A validated ExtractedPosting holding exactly what the model returned.
@@ -241,7 +268,13 @@ def extract_posting(raw_text: str) -> ExtractedPosting:
         )
 
     provider = get_provider("posting")
-    prompt = f"{POSTING_INSTRUCTIONS}\n\n=== JOB POSTING TEXT ===\n{document}"
+    # The title goes *before* the body. A 20k-character page reduced to prose
+    # buries a one-line hint appended after it, and the whole point of passing
+    # the title is that the model reads it.
+    known_title = f"=== KNOWN TITLE ===\n{title.strip()}\n\n" if title and title.strip() else ""
+    prompt = (
+        f"{POSTING_INSTRUCTIONS}\n\n{known_title}=== JOB POSTING TEXT ===\n{document}"
+    )
 
     raw_json = provider.complete_json(prompt, ExtractedPosting.model_json_schema())
 

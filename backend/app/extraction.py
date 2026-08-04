@@ -69,6 +69,16 @@ PROFILE_EXTRACTION_VERSION = 3
 # Job-posting extraction (ExtractedPosting, below).
 #
 #   1 -- initial JD prompt and schema, M7.
+#   2 -- give the prompt the board's own title, make `title` a required field,
+#        and tell it to read the level off the title. Version 1 was shown the
+#        posting body and nothing else, so `seniority` was reconstructed from
+#        prose that usually never restates the level -- 34 of the catalog's
+#        "Staff ..." postings came back "unknown" and 15 came back "junior".
+#        `title` was optional-with-a-default, which is the SkillItem.source
+#        mistake again: the model was free to omit it, and did.
+#
+#        Note this bump is what re-extracts the catalog; the deterministic
+#        override in app.seniority repairs `seniority` without waiting for it.
 #
 # The design question recorded here at M5 has been answered: postings get
 # their own schema rather than reusing ExtractedProfile. The spec suggests
@@ -81,7 +91,7 @@ PROFILE_EXTRACTION_VERSION = 3
 # years-per-skill as a possession) or the necessity distinction has to be
 # recovered by parsing prose at scoring time, which is the regex resume
 # parsing that section 8.1 exists to forbid.
-POSTING_EXTRACTION_VERSION = 1
+POSTING_EXTRACTION_VERSION = 2
 
 
 # Where in the resume a skill was found. Ordered strongest to weakest, which
@@ -218,7 +228,22 @@ class ExtractedPosting(BaseModel):
     would make "5 years of Kubernetes" read as five years of total career.
     """
 
-    title: str | None = None
+    # Required with null as the escape hatch, not optional with a default --
+    # the same shape as SkillItem.source and for the same measured reason. A
+    # Pydantic default drops the field from the schema's `required` list, and a
+    # field a model is allowed to omit is a field it will omit: every posting
+    # reached by a bare URL rendered as "Untitled posting" in the feed.
+    #
+    # Board postings do not depend on this, because the board states the title
+    # and `_prepare_posting` prefers it. This is the answer for the postings
+    # that have no board behind them.
+    title: str | None = Field(
+        description=(
+            "The job title. When a KNOWN TITLE is supplied with the posting "
+            "text, return it verbatim. Otherwise take it from the posting's "
+            "own heading. Null only if the text states no title at all."
+        )
+    )
     company: str | None = None
     location: str | None = None
     remote_type: RemoteType

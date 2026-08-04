@@ -687,6 +687,23 @@ class IngestJob(Base):
     url: Mapped[str] = mapped_column(Text, nullable=False)
     url_hash: Mapped[str] = mapped_column(Text, nullable=False)
 
+    # The board's title for this posting, carried from the crawl that created
+    # the job to the fetch that stores it. NULL for a user-submitted URL, which
+    # has no board behind it to ask.
+    #
+    # This column exists because a job row is the *only* thing that survives
+    # the enqueue boundary. `discover_source` holds a DiscoveredPosting with a
+    # title on it, and everything it does not write here is gone by the time a
+    # worker picks the fetch up seconds or hours later -- so `_upsert_posting`
+    # stored a posting with no title and left the feed waiting on the LLM to
+    # invent one. Measured before the fix: 108 of 108 Greenhouse postings, and
+    # 401 rows overall, rendering as "Untitled posting".
+    #
+    # Denormalized on purpose. The alternative is re-enumerating the board at
+    # fetch time to look the title back up, which is a second request to
+    # someone else's server to recover a string we already had in hand.
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # The posting this work produced, set on success. Null while queued, and
     # null forever for a job that never succeeded -- which is precisely the
     # work-record/result-record split: the attempt is recorded either way,
