@@ -314,6 +314,20 @@ function FilterBar({
 export function MatchFeed({ profileId }: { profileId: number }) {
   const [filters, setFilters] = useState<FeedFilters>({});
 
+  /* Section 6.9 option 1, client half: a feed is built because somebody asked
+   * for it, not on a schedule. The server decides whether there is anything
+   * to do -- it answers `already_current` without touching the queue when
+   * this profile already has a feed -- so this stays a plain button rather
+   * than something that has to reason about freshness itself.
+   *
+   * Deliberately not automatic on mount. An auto-trigger would fire for every
+   * profile a user clicks through, and a feed build is a recall plus 200
+   * reranks; making that the cost of *looking* at a profile is how a lazy
+   * strategy quietly becomes an eager one. */
+  const build = useMutation({
+    mutationFn: () => matchApi.recommend(profileId),
+  });
+
   const matches = useQuery({
     /* Filters belong in the key. Without them React Query would serve the
      * previous filter's rows from cache while the new request is in flight,
@@ -328,8 +342,23 @@ export function MatchFeed({ profileId }: { profileId: number }) {
      * alive by `refetchInterval` staying on only while nothing has arrived. */
     staleTime: FEED_STALE_MS,
     refetchOnWindowFocus: true,
-    refetchInterval: (query) =>
-      (query.state.data?.length ?? 0) === 0 ? MATCH_POLL_MS : false,
+    refetchInterval: (query) => {
+      const rows = query.state.data ?? [];
+      /* Nothing yet: this is the Path A case where a score really does arrive
+       * seconds after a submission, so the old interval still earns its keep. */
+      if (rows.length === 0) return MATCH_POLL_MS;
+      /* A build is running and none of its results have landed. Without this
+       * the poll would already be off -- the feed has rows, they are just the
+       * wrong ones -- and the recommendations would appear only on the next
+       * focus event, which looks like the button did nothing. */
+      if (
+        build.data?.status === "queued" &&
+        !rows.some((m) => m.origin === "recommendation")
+      ) {
+        return MATCH_POLL_MS;
+      }
+      return false;
+    },
   });
 
   const rows = matches.data ?? [];
@@ -355,7 +384,42 @@ export function MatchFeed({ profileId }: { profileId: number }) {
             resume, best first.
           </p>
         </div>
+
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          disabled={build.isPending}
+          onClick={() => build.mutate()}
+        >
+          {build.isPending ? "Starting…" : "Find matches for me"}
+        </button>
       </div>
+
+      {/* Three outcomes, three messages. `already_current` and
+        * `profile_not_ready` both mean "no job was queued", and saying so the
+        * same way would leave someone waiting on a build that is not coming. */}
+      {build.data?.status === "queued" && (
+        <p className="mf-note" role="status">
+          Building your feed — searching the catalog for postings that fit this
+          resume. New matches appear here as they are scored.
+        </p>
+      )}
+      {build.data?.status === "already_current" && (
+        <p className="mf-note" role="status">
+          Your feed is already up to date with the current scorer.
+        </p>
+      )}
+      {build.data?.status === "profile_not_ready" && (
+        <p className="mf-note" role="status">
+          This resume is still being processed. Once extraction finishes, we can
+          search the catalog against it.
+        </p>
+      )}
+      {build.isError && (
+        <p className="form-error" role="alert">
+          {errorMessage(build.error, "Could not start the search.")}
+        </p>
+      )}
 
       <FilterBar filters={filters} onChange={setFilters} />
 

@@ -857,6 +857,49 @@
         }
       }
     },
+    "/api/matches/recommendations": {
+      "post": {
+        "tags": [
+          "matches"
+        ],
+        "summary": "Build Recommendations",
+        "description": "Ask for this profile's feed to be built, if it needs building.\n\nSection 6.9 option 1 -- lazy, with a warm state. The three properties that\nmake this the chosen strategy over a nightly sweep are all visible here:\nthe work is queued rather than run on the request path, it happens because\nsomebody asked rather than on a schedule, and the cost therefore tracks\nactive users rather than registered ones.\n\n**202 always, never 200 with results.** Building a feed is a recall plus\n200 reranks; doing it inline would make the first feed request the slowest\nrequest in the application and hold a worker-equivalent of work open on a\nweb connection. The client gets an acknowledgement and polls the feed it\nwas already polling.\n\n**`already_current` is the interesting return.** A feed that was scored\nunder the current `scorer_version` does not need rebuilding, so a client\nthat polls this endpoint cannot stampede the queue -- which matters\nbecause the natural client implementation calls it whenever the feed looks\nempty, and an empty feed is exactly the state a user stares at.",
+        "operationId": "build_recommendations_api_matches_recommendations_post",
+        "parameters": [
+          {
+            "name": "profile_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Profile Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecommendationRun"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/matches/{match_id}/feedback": {
       "post": {
         "tags": [
@@ -1957,6 +2000,35 @@
         ],
         "title": "QueueHealth",
         "description": "One queue's depth and the registries around it."
+      },
+      "RecommendationRun": {
+        "properties": {
+          "profile_id": {
+            "type": "integer",
+            "title": "Profile Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "already_current",
+              "profile_not_ready"
+            ],
+            "title": "Status"
+          },
+          "queued": {
+            "type": "boolean",
+            "title": "Queued"
+          }
+        },
+        "type": "object",
+        "required": [
+          "profile_id",
+          "status",
+          "queued"
+        ],
+        "title": "RecommendationRun",
+        "description": "The outcome of asking for a feed to be built.\n\n`status` rather than a bare boolean because the three cases call for three\ndifferent things from the UI: `queued` means show a building state and keep\npolling, `already_current` means the feed on screen is the answer, and\n`profile_not_ready` means wait for extraction rather than for scoring. A\nboolean would collapse the last two into \"nothing happened\", and the user\nwould be told to wait for a job that is never going to run."
       },
       "RegisterRequest": {
         "properties": {

@@ -164,6 +164,123 @@ class TestFeedFilters:
         assert response.status_code == 404
 
 
+class RecordingQueue:
+    """Captures enqueues instead of reaching Redis."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def enqueue(self, func_name, *args, **kwargs):
+        self.calls.append((func_name, args))
+        return None
+
+
+@pytest.fixture
+def queue(monkeypatch) -> RecordingQueue:
+    recorder = RecordingQueue()
+    monkeypatch.setattr("app.routers.matches.get_queue", lambda _name=None: recorder)
+    return recorder
+
+
+class TestBuildRecommendations:
+    def test_queues_a_build_for_a_profile_with_no_feed(self, feed, queue):
+        db = SessionLocal()
+        try:
+            db.get(Profile, feed["profile_id"]).embedding = [0.0] * 384
+            db.commit()
+        finally:
+            db.close()
+
+        # The fixture's matches are all scorer_version SCORER_VERSION but the
+        # recommendation-origin ones exist, so clear them to reach the
+        # never-built state this endpoint is for.
+        db = SessionLocal()
+        try:
+            db.query(Match).filter(
+                Match.profile_id == feed["profile_id"],
+                Match.origin == "recommendation",
+            ).delete(synchronize_session=False)
+            db.commit()
+        finally:
+            db.close()
+
+        response = client.post(
+            "/api/matches/recommendations", params={"profile_id": feed["profile_id"]}
+        )
+        assert response.status_code == 202
+        assert response.json()["status"] == "queued"
+        assert queue.calls and queue.calls[0][0] == "app.workers.tasks.score_profile"
+
+    def test_does_not_rebuild_a_current_feed(self, feed, queue):
+        """A client polling an empty-looking feed must not stampede the queue."""
+        response = client.post(
+            "/api/matches/recommendations", params={"profile_id": feed["profile_id"]}
+        )
+        assert response.status_code == 202
+        assert response.json()["status"] == "already_current"
+        assert queue.calls == [], "a current feed must not be rebuilt"
+
+    def test_reports_a_profile_that_cannot_be_recalled_against(self, feed, queue):
+        """No embedding means wait for extraction, not for scoring.
+
+        Collapsing this into "nothing happened" would leave the UI telling the
+        user to wait for a job that is never going to run.
+        """
+        db = SessionLocal()
+        try:
+            db.query(Match).filter(
+                Match.profile_id == feed["profile_id"],
+                Match.origin == "recommendation",
+            ).delete(synchronize_session=False)
+            db.get(Profile, feed["profile_id"]).embedding = None
+            db.commit()
+        finally:
+            db.close()
+
+        response = client.post(
+            "/api/matches/recommendations", params={"profile_id": feed["profile_id"]}
+        )
+        assert response.json()["status"] == "profile_not_ready"
+        assert queue.calls == []
+
+    def test_another_users_profile_is_404(self, feed, queue, make_user, as_user):
+        as_user(make_user())
+        response = client.post(
+            "/api/matches/recommendations", params={"profile_id": feed["profile_id"]}
+        )
+        assert response.status_code == 404
+        assert queue.calls == []
+
+    def test_a_broker_failure_is_reported_rather_than_promised(
+        self, feed, monkeypatch
+    ):
+        """There is no durable row here for a sweep to pick up later.
+
+        Returning "queued" when the enqueue failed would promise a feed that
+        nothing is building.
+        """
+        db = SessionLocal()
+        try:
+            db.query(Match).filter(
+                Match.profile_id == feed["profile_id"],
+                Match.origin == "recommendation",
+            ).delete(synchronize_session=False)
+            db.get(Profile, feed["profile_id"]).embedding = [0.0] * 384
+            db.commit()
+        finally:
+            db.close()
+
+        def boom(_name=None):
+            raise RuntimeError("redis is down")
+
+        monkeypatch.setattr("app.routers.matches.get_queue", boom)
+
+        response = client.post(
+            "/api/matches/recommendations", params={"profile_id": feed["profile_id"]}
+        )
+        assert response.status_code == 503
+
+
 class TestFeedback:
     def test_records_a_verdict(self, feed):
         match_id = feed["matches"]["rec"]

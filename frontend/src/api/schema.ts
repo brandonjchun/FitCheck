@@ -465,6 +465,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/matches/recommendations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Build Recommendations
+         * @description Ask for this profile's feed to be built, if it needs building.
+         *
+         *     Section 6.9 option 1 -- lazy, with a warm state. The three properties that
+         *     make this the chosen strategy over a nightly sweep are all visible here:
+         *     the work is queued rather than run on the request path, it happens because
+         *     somebody asked rather than on a schedule, and the cost therefore tracks
+         *     active users rather than registered ones.
+         *
+         *     **202 always, never 200 with results.** Building a feed is a recall plus
+         *     200 reranks; doing it inline would make the first feed request the slowest
+         *     request in the application and hold a worker-equivalent of work open on a
+         *     web connection. The client gets an acknowledgement and polls the feed it
+         *     was already polling.
+         *
+         *     **`already_current` is the interesting return.** A feed that was scored
+         *     under the current `scorer_version` does not need rebuilding, so a client
+         *     that polls this endpoint cannot stampede the queue -- which matters
+         *     because the natural client implementation calls it whenever the feed looks
+         *     empty, and an empty feed is exactly the state a user stares at.
+         */
+        post: operations["build_recommendations_api_matches_recommendations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/matches/{match_id}/feedback": {
         parameters: {
             query?: never;
@@ -1033,6 +1071,28 @@ export interface components {
             declared: boolean;
             /** Worker Count */
             worker_count: number;
+        };
+        /**
+         * RecommendationRun
+         * @description The outcome of asking for a feed to be built.
+         *
+         *     `status` rather than a bare boolean because the three cases call for three
+         *     different things from the UI: `queued` means show a building state and keep
+         *     polling, `already_current` means the feed on screen is the answer, and
+         *     `profile_not_ready` means wait for extraction rather than for scoring. A
+         *     boolean would collapse the last two into "nothing happened", and the user
+         *     would be told to wait for a job that is never going to run.
+         */
+        RecommendationRun: {
+            /** Profile Id */
+            profile_id: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "queued" | "already_current" | "profile_not_ready";
+            /** Queued */
+            queued: boolean;
         };
         /**
          * RegisterRequest
@@ -1723,6 +1783,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MatchResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    build_recommendations_api_matches_recommendations_post: {
+        parameters: {
+            query: {
+                profile_id: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecommendationRun"];
                 };
             };
             /** @description Validation Error */

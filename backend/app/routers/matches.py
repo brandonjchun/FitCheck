@@ -13,12 +13,19 @@ expose one person's resume analysis to anyone who could guess an integer.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import JobPosting, Match, MatchFeedback, Profile, User
-from app.schemas import FeedbackCreate, FeedbackResponse, MatchResponse
+from app.queues import FAILURE_TTL, QUEUE_SCORING, RESULT_TTL, get_queue
+from app.schemas import (
+    FeedbackCreate,
+    FeedbackResponse,
+    MatchResponse,
+    RecommendationRun,
+)
+from app.scoring import SCORER_VERSION
 from app.security import current_user
 
 logger = logging.getLogger(__name__)
@@ -28,6 +35,13 @@ router = APIRouter(prefix="/api/matches", tags=["matches"])
 # Validated in the router rather than by a DB constraint, so a bad value gets
 # a 422 that names the alternatives instead of a 500 from an integrity error.
 ORIGINS: frozenset[str] = frozenset({"user_submission", "recommendation"})
+
+# Longer than the shared JOB_TIMEOUT, because this job is a different shape
+# from the ones that constant was set for. A feed build is one recall plus up
+# to 200 reranks, and while each rerank is microseconds, the profile embedding
+# it may have to compute first is local model inference. 120s is comfortable
+# for a single pair and tight for a batch.
+RECOMMEND_TIMEOUT = 600
 
 # The feed is paged, and the page is capped. An unbounded `limit` is a way to
 # ask the database for every match a user has ever had in one query, which
@@ -185,6 +199,83 @@ def get_match(
     response.headers["Cache-Control"] = "no-store"
     match, posting = row
     return _to_response(match, posting)
+
+
+@router.post("/recommendations", response_model=RecommendationRun, status_code=202)
+def build_recommendations(
+    profile_id: int,
+    user: User = Depends(current_user),
+    db: Session = Depends(get_db),
+) -> RecommendationRun:
+    """Ask for this profile's feed to be built, if it needs building.
+
+    Section 6.9 option 1 -- lazy, with a warm state. The three properties that
+    make this the chosen strategy over a nightly sweep are all visible here:
+    the work is queued rather than run on the request path, it happens because
+    somebody asked rather than on a schedule, and the cost therefore tracks
+    active users rather than registered ones.
+
+    **202 always, never 200 with results.** Building a feed is a recall plus
+    200 reranks; doing it inline would make the first feed request the slowest
+    request in the application and hold a worker-equivalent of work open on a
+    web connection. The client gets an acknowledgement and polls the feed it
+    was already polling.
+
+    **`already_current` is the interesting return.** A feed that was scored
+    under the current `scorer_version` does not need rebuilding, so a client
+    that polls this endpoint cannot stampede the queue -- which matters
+    because the natural client implementation calls it whenever the feed looks
+    empty, and an empty feed is exactly the state a user stares at.
+    """
+    profile = db.scalar(
+        select(Profile).where(Profile.id == profile_id, Profile.user_id == user.id)
+    )
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"Profile {profile_id} does not exist")
+
+    existing = db.scalar(
+        select(func.count())
+        .select_from(Match)
+        .where(
+            Match.profile_id == profile_id,
+            Match.origin == "recommendation",
+            Match.scorer_version == SCORER_VERSION,
+        )
+    )
+    if existing:
+        return RecommendationRun(
+            profile_id=profile_id, status="already_current", queued=False
+        )
+
+    # A profile with no vector cannot be recalled against, and saying so is
+    # more use than queueing a job that will return "no_embedding" into a log
+    # nobody is reading. The extraction that produces the vector is itself a
+    # queued job, so this is a normal transient state right after upload.
+    if profile.embedding is None:
+        return RecommendationRun(
+            profile_id=profile_id, status="profile_not_ready", queued=False
+        )
+
+    try:
+        get_queue(QUEUE_SCORING).enqueue(
+            "app.workers.tasks.score_profile",
+            profile_id,
+            job_timeout=RECOMMEND_TIMEOUT,
+            result_ttl=RESULT_TTL,
+            failure_ttl=FAILURE_TTL,
+        )
+    except Exception as exc:
+        # Redis down is not the caller's problem to solve, but it is their
+        # problem to know about: unlike an upload, there is no durable row
+        # here that a later sweep would pick up, so silently returning
+        # "queued" would promise a feed that nothing is building.
+        logger.error("could not enqueue score_profile for %s: %s", profile_id, exc)
+        raise HTTPException(
+            status_code=503, detail="Could not queue the feed build. Try again shortly."
+        )
+
+    logger.info("recommendations: queued score_profile for %s", profile_id)
+    return RecommendationRun(profile_id=profile_id, status="queued", queued=True)
 
 
 @router.post(

@@ -296,3 +296,15 @@ a.mf-title:hover {
   font-size: 0.75rem;
   color: var(--text-muted);
 }
+
+/* Status line for a feed build. Sits above the filters because it describes
+   the list as a whole, not the filtering of it. */
+.mf-note {
+  margin-top: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}

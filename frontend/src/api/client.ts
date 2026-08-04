@@ -41,6 +41,7 @@ export type QueueHealth = components["schemas"]["QueueHealth"];
 export type SourceFreshness = components["schemas"]["SourceFreshness"];
 export type Feedback = components["schemas"]["FeedbackResponse"];
 export type FeedbackVerdict = components["schemas"]["FeedbackCreate"]["verdict"];
+export type RecommendationRun = components["schemas"]["RecommendationRun"];
 export type WorkerInfo = components["schemas"]["WorkerInfo"];
 export type DeadLetterItem = components["schemas"]["DeadLetterItem"];
 
@@ -186,6 +187,16 @@ export const matchApi = {
   feedback: (matchId: number, verdict: FeedbackVerdict) =>
     api
       .post<Feedback>(`/api/matches/${matchId}/feedback`, { verdict })
+      .then((r) => r.data),
+
+  /* Asks for the feed to be built. Safe to call whenever the feed looks
+   * empty: the server answers `already_current` without touching the queue
+   * if this profile already has a feed under the current scorer. */
+  recommend: (profileId: number) =>
+    api
+      .post<RecommendationRun>("/api/matches/recommendations", null, {
+        params: { profile_id: profileId },
+      })
       .then((r) => r.data),
 };
 

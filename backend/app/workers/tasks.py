@@ -657,8 +657,23 @@ def discover_source(source_id: int) -> str:
         source.last_crawled_at = func.now()
         db.commit()
 
-    # The boundary between "we attempted" and "we know what is there".
-    crawl_started_at = datetime.now(UTC)
+        # The boundary between "we attempted" and "we know what is there".
+        #
+        # Read from the database, not from `datetime.now()`, and this is a
+        # correctness requirement rather than a preference. Both sides of the
+        # closure comparison have to come from one clock: postings are stamped
+        # `last_seen_at = func.now()`, which is Postgres's clock, so taking the
+        # boundary from the worker process compares two machines' clocks with
+        # `<`. A worker running even milliseconds ahead of the database makes
+        # every posting it just touched look older than the crawl that touched
+        # it, and `_close_missing_postings` then tombstones the entire live
+        # board -- the exact catastrophe the full-enumeration guard exists to
+        # prevent, arriving through the back door and logging nothing.
+        #
+        # Found by a test that only failed under certain orderings, which is
+        # what clock skew looks like from the outside: intermittent, and
+        # indistinguishable from flakiness until you compare the two sources.
+        crawl_started_at = db.execute(select(func.now())).scalar_one()
 
     try:
         discovered = enumerate_source(kind, token)

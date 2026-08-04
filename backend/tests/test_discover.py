@@ -8,7 +8,7 @@ hundred postings from every user's feed and logs it as a success, so most of
 this file is about proving closure only happens after a complete enumeration.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -153,6 +153,38 @@ class TestClosureDetection:
         assert len(rows) == 2
         assert all(r.closed_at is None for r in rows.values()), (
             "a failed crawl must never tombstone anything"
+        )
+
+    def test_closure_uses_the_database_clock_not_the_workers(
+        self, monkeypatch, source_id
+    ):
+        """Both sides of the closure comparison must come from one clock.
+
+        Postings are stamped `last_seen_at = func.now()` in Postgres. If the
+        crawl boundary came from the worker's own clock instead, any skew
+        would make freshly-touched postings look older than the crawl that
+        touched them -- and the whole live board gets tombstoned, silently.
+
+        This drives the worker clock an hour into the future, which is what
+        skew looks like at its worst. Nothing may close: every posting here
+        was seen by this very crawl.
+        """
+
+        class FutureDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime.now(tz) + timedelta(hours=1)
+
+        monkeypatch.setattr(tasks, "datetime", FutureDatetime)
+
+        _enumerate_returns(monkeypatch, [_posting("a"), _posting("b")])
+        tasks.discover_source(source_id)
+        tasks.discover_source(source_id)
+
+        rows = _postings_for(source_id)
+        assert len(rows) == 2
+        assert all(r.closed_at is None for r in rows.values()), (
+            "a worker clock ahead of the database must not close live postings"
         )
 
     def test_reappearing_posting_is_reopened(self, monkeypatch, source_id):

@@ -424,6 +424,22 @@ class MatchResponse(BaseModel):
     posting_company: str | None = None
 
 
+class RecommendationRun(BaseModel):
+    """The outcome of asking for a feed to be built.
+
+    `status` rather than a bare boolean because the three cases call for three
+    different things from the UI: `queued` means show a building state and keep
+    polling, `already_current` means the feed on screen is the answer, and
+    `profile_not_ready` means wait for extraction rather than for scoring. A
+    boolean would collapse the last two into "nothing happened", and the user
+    would be told to wait for a job that is never going to run.
+    """
+
+    profile_id: int
+    status: Literal["queued", "already_current", "profile_not_ready"]
+    queued: bool
+
+
 class FeedbackCreate(BaseModel):
     """A user's judgment on one recommendation.
 
