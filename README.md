@@ -229,6 +229,19 @@ rq worker --url redis://localhost:6379 ingest
 
 ---
 
+### Scheduler and discovery
+
+`discover_source` enumerates one board; nothing called it until M8's scheduler landed. A dedicated `scheduler` service asks every few minutes which sources are due and enqueues them onto `discovery`, where `worker-discovery` drains them.
+
+"Due" is computed in SQL against `last_crawled_at`, not in Python. Both sides of that comparison have to come from one clock — the same defect that made closure detection tombstone live boards came from mixing a worker's clock with Postgres's.
+
+The stamp happens *before* enumerating, which is what makes ticking safe: a board mid-crawl is no longer due, so a fast tick cannot stack two crawls of the same board on somebody else's server.
+
+```bash
+# one process, deliberately -- see docker-compose.yml
+docker compose up -d scheduler worker-discovery
+```
+
 ## Fetching Responsibly
 
 Path A makes one request when a human clicks a button. Path B makes thousands, unattended, on a schedule. The rules are non-negotiable:
@@ -385,16 +398,16 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 | 2 | **M1** Resume ingestion | Upload PDF/DOCX → text extracted → `profiles` row → visible at `/docs` | ✅ Done |
 | 3 | **M2** Structured profile | LLM extraction validated by Pydantic; skill aliases normalized; `extraction_version` stored | ✅ Done |
 | 4 | **M3** Auth | Register/login/logout; Argon2id; Redis sessions; `owned_profile` dependency; another user's profile returns 404 | ✅ Done |
-| 5–6 | **M4** Queues + batch | Four queues declared and separated; submit URL → `202`; `.txt` batch → N `ingest` jobs + one aggregate status endpoint, capped; polling UI | ✅ Backend done; polling UI pending |
+| 5–6 | **M4** Queues + batch | Four queues declared and separated; submit URL → `202`; `.txt` batch → N `ingest` jobs + one aggregate status endpoint, capped; polling UI | ✅ Done |
 | 7 | **M5** Real fetching | Robots, timeouts, size caps, Redis per-domain token bucket, HTML→text, URL normalization → `canonical_key` | ✅ Done |
-| 8 | **M6** Failure handling | Error classification, backoff with jitter, dead-letter registry, requeue endpoint | ⚠️ Classification and jitter done in M5; dead-letter/requeue endpoint pending |
-| 9 | **M7** Scoring (Path A) | Embeddings in pgvector; skill overlap; blended score persisted to `matches`. **Path A is demoable here** | ❌ Not started |
-| 10–11 | **M8** Catalog + crawler | `sources` seeded with 5 boards; `discover` enumerates; fan-out; content-hash hit rate measured; guarded closure detection | ❌ Not started |
-| 12 | **M9** Recommendations | HNSW index; two-stage recall→rerank; `score_profile` job; feed is a pure indexed SELECT; p95 vs exact scan | ❌ Not started |
-| 13 | **M10** Feed UI + ops | Ranked feed with filters and inline explanation; feedback capture; ops dashboard | ❌ Not started |
-| 14 | **M11** Load test + document | Locust burst on all paths; p50/p95/p99; queue depth under load | ❌ Not started |
+| 8 | **M6** Failure handling | Error classification, backoff with jitter, dead-letter registry, requeue endpoint | ✅ Done |
+| 9 | **M7** Scoring (Path A) | Embeddings in pgvector; skill overlap; blended score persisted to `matches`. **Path A is demoable here** | ✅ Done |
+| 10–11 | **M8** Catalog + crawler | `sources` seeded with 5 boards; `discover` enumerates; fan-out; content-hash hit rate measured; guarded closure detection | ✅ Done — gate hit rate **100%** on a steady-state re-crawl |
+| 12 | **M9** Recommendations | HNSW index; two-stage recall→rerank; `score_profile` job; feed is a pure indexed SELECT; p95 vs exact scan | ✅ Done — **5.8× at 10k rows, 8.9× at 50k** |
+| 13 | **M10** Feed UI + ops | Ranked feed with filters and inline explanation; feedback capture; ops dashboard | ✅ Done |
+| 14 | **M11** Load test + document | Locust burst on all paths; p50/p95/p99; queue depth under load | ⏳ Next |
 
-**Ship M1–M7 before touching M8.** A working single-path pipeline that fetches and fails gracefully is a complete, demoable system. A half-built crawler bolted to a queue that can't survive a timeout is not.
+**Ship M1–M7 before touching M8.** A working single-path pipeline that fetches and fails gracefully is a complete, demoable system. A half-built crawler bolted to a queue that can't survive a timeout is not. That ordering was followed.
 
 ### What's actually in the repo today
 
@@ -407,6 +420,27 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 
 - **M4 backend complete.** Four separated queues with two worker classes, plus the batch `.txt` upload that fans out onto `ingest`. Caps are counts rather than bytes — the 2 MB body limit bounds bytes, and 2 MB of text is roughly 40,000 URLs. Batch progress is derived with a `GROUP BY`, never a stored counter that N workers would double-count.
 - **M5 complete.** Real fetching: robots-checked and cached, connect/read timeouts, a size cap enforced *while streaming* rather than from a `Content-Length` a server can omit or lie about, and a Redis token bucket shared across worker processes.
+
+- **M6 complete.** Errors classified transient vs permanent at the provider seam, exponential backoff with jitter, a dead-letter registry, and a requeue endpoint on the ops dashboard.
+- **M7 complete.** MiniLM embeddings (384-d) in pgvector for both profiles and postings, weighted skill overlap with partial credit, and a `0.4 semantic / 0.6 skill` blend whose full breakdown is persisted to `matches` and rendered inline. The weights are a stated judgment call, measured against five postings of known correct ordering — see `DECISIONS.md` D-059.
+- **M8 complete.** Five job boards crawled through their public APIs (Greenhouse, Lever, Ashby), a scheduler that decides when each is due, fan-out onto `ingest`, and closure detection guarded on full-enumeration success.
+
+  **The content-hash gate hit 100% on a steady-state re-crawl** — 98 of 98 postings re-enumerated with unchanged content skipped extraction and embedding entirely, turning what would have been 98 LLM calls into zero. Reported live on the ops dashboard rather than asserted here.
+
+  Two failures worth recording because both were silent. Closure detection compared a *worker* timestamp against `last_seen_at` values stamped by *Postgres*, so any clock skew tombstoned the entire live board while logging a successful crawl. And the crawler never triggered extraction, so 549 of 565 postings sat unembedded and invisible to the feed.
+- **M9 complete.** An HNSW index partial on open postings, two-stage recall→rerank, a `score_profile` job, and a feed endpoint that is a pure indexed SELECT.
+
+  **Measured against an exact scan** with `scripts/bench_recall.py`, which asserts on the query plan rather than trusting a timing:
+
+  | rows | exact p95 | HNSW p95 | speed-up |
+  | --- | --- | --- | --- |
+  | 10,000 | 8.08 ms | 1.40 ms | **5.8×** |
+  | 50,000 | 19.00 ms | 2.14 ms | **8.9×** |
+
+  The exact scan grows linearly while the index grows logarithmically, which is the entire argument for having one. That harness also caught a regression no test would have: the recall filter used `jsonb_typeof(extracted) = 'object'`, an opaque call the planner cannot estimate, so it silently chose a sequential scan and the index sat unused.
+- **M10 complete.** Ranked feed with read-time filters and inline explanations, feedback capture into an append-only `match_feedback` table, and an ops dashboard showing per-queue depth, per-source crawl freshness, and the gate hit rate. Structured logging via `structlog` with request- and job-scoped correlation ids.
+
+  Two tabs unlock on sign-in. **Insights** aggregates every stored breakdown to rank the requirements you fail most often — the one thing 50 per-match explanations can say that one cannot. **Saved** is the application tracker the feedback buttons feed, showing each posting once at its latest stage.
 
   Verified through the whole stack, not just in tests — API → `ingest` queue → containerised worker → `job_postings`. A four-URL batch drained in 4 seconds: two succeeded, two went straight to `dead` (a 404 and a robots disallow) without consuming a single retry.
 
