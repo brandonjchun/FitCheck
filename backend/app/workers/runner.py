@@ -21,11 +21,42 @@ ones that do not exist yet.
 
 from __future__ import annotations
 
+import rq.logutils
+import rq.worker
 from rq import Worker
 from rq.job import Job
 from rq.queue import Queue
 
 from app.logging_setup import bind_context, clear_context, configure_logging
+
+
+def _no_op_loghandlers(*_args, **_kwargs) -> None:
+    """Stop RQ installing its own handlers on `rq.worker` and `rq.job`.
+
+    RQ calls `setup_loghandlers(name='rq.worker')` during bootstrap and again
+    as the worker starts listening. Each call attaches a handler directly to
+    that logger, and because those loggers also propagate to the root -- where
+    this app's handler lives -- every RQ line is emitted twice: once in RQ's
+    format, once in ours. A queue that appears to log everything twice reads
+    as a queue that is doing everything twice.
+
+    Neutered at the module level rather than by overriding a method, because
+    `Worker.bootstrap` calls the function through its own module namespace;
+    a subclass override is simply not consulted. Stripping the handlers after
+    the fact was tried first and loses to the second call.
+
+    The lines are not lost. Both loggers keep `propagate = True`, so every one
+    of them arrives at the root handler and is rendered in this app's format,
+    with the job correlation `LoggingWorker` adds.
+    """
+    return None
+
+
+rq.logutils.setup_loghandlers = _no_op_loghandlers
+# `rq.worker` imported the symbol directly (`from rq.logutils import
+# setup_loghandlers`), so patching the source module alone leaves the worker's
+# own reference pointing at the original.
+rq.worker.setup_loghandlers = _no_op_loghandlers
 
 
 class LoggingWorker(Worker):
@@ -37,6 +68,35 @@ class LoggingWorker(Worker):
         # correct and wasteful -- it rebuilds the handler chain thousands of
         # times a day for output that never changes.
         configure_logging()
+
+        # The `rq` CLI calls `setup_loghandlers_from_args` before it ever
+        # constructs a worker, and that attaches a handler to the `rq.worker`
+        # logger specifically -- not to the root. So `configure_logging`'s
+        # root-level handling never sees it, `rq.worker` keeps propagating to
+        # the root as well, and every worker line is emitted twice in two
+        # different formats. A queue that appears to log everything twice
+        # reads as a queue that is doing everything twice.
+        #
+        # Note the ordering that makes this unavoidable: RQ installs its
+        # handler only `if not _has_effective_handler(logger)`, and at CLI
+        # time there is none, because this app's handler is not installed
+        # until the line above. Being polite about foreign handlers cannot
+        # help here -- the handler did not exist yet when the policy ran.
+        #
+        # Cleared rather than `propagate = False`, because the goal is one
+        # copy *in this app's format* carrying the job correlation added
+        # below. Silencing propagation would keep RQ's format and lose that.
+        #
+        # Scoped to this entry point rather than pushed into
+        # `configure_logging`: a worker process is a place where "exactly one
+        # log format" is safe to insist on, since nothing else owns its
+        # stdout. Elsewhere -- tests, an embedding host process -- it is not.
+        import logging as _logging
+
+        for name in ("rq.worker", "rq.job", "rq.scheduler"):
+            rq_logger = _logging.getLogger(name)
+            rq_logger.handlers = []
+            rq_logger.propagate = True
 
     def perform_job(self, job: Job, queue: Queue) -> bool:
         bind_context(

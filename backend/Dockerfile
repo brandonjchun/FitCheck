@@ -45,6 +45,13 @@ SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')" \
     && chmod -R a+rX /opt/hf
 
 COPY app ./app
+# The scheduler and the operational one-offs (seeding, backfill, benchmark)
+# run inside this image, so they have to be in it. Copied separately from
+# `app` to keep the layer cache useful: these change on a different rhythm
+# than application code.
+COPY scripts ./scripts
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 # Non-root. The worker executes model output and parses untrusted documents;
 # there is no reason for it to be able to write outside its own workspace.
