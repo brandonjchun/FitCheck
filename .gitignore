@@ -55,6 +55,11 @@ logs/
 .idea/
 *.swp
 
+# --- Claude Code ---
+# Per-machine settings only. A shared .claude/settings.json stays committable;
+# the .local.json sibling is personal and does not belong in the repository.
+.claude/settings.local.json
+
 # --- OS ---
 Thumbs.db
 desktop.ini

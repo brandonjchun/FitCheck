@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(git add *)",
-      "Bash(git commit -q -m 'Discover postings from job boards with a provider fallback *)"
-    ]
-  }
-}
