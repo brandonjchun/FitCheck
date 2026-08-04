@@ -412,3 +412,77 @@ class TestSkippingDoesNotCloseThings:
         crawl([_posting("1", stamp)], source_id)
 
         assert _stored(source_id)[key].closed_at is None
+
+
+class TestPromotedMetadata:
+    """The board's structured fields must survive extraction.
+
+    A board API states the title as data; the LLM infers it from prose and
+    returns null whenever the description has no header. Assigning the
+    extraction's value unconditionally destroys the reliable one -- measured
+    in production as 0 of 98 postings keeping a title after their first
+    extraction pass.
+    """
+
+    def test_a_null_extracted_title_does_not_erase_the_board_title(
+        self, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        from app.db import SessionLocal
+        from app.models import JobPosting
+        from app.workers import tasks
+
+        db = SessionLocal()
+        try:
+            posting = JobPosting(
+                canonical_key=f"promote:{datetime.now(UTC).timestamp()}",
+                url="https://example.com/p",
+                content_hash="promote-hash",
+                raw_text="A description with no header line. " * 12,
+                title="Staff Backend Engineer",
+                company="Acme",
+            )
+            db.add(posting)
+            db.commit()
+            db.refresh(posting)
+            pid = posting.id
+        finally:
+            db.close()
+
+        try:
+            # An extraction that found no title, which is the common case for
+            # a description that is pure prose.
+            monkeypatch.setattr(
+                tasks,
+                "extract_posting",
+                lambda _text: SimpleNamespace(
+                    title=None,
+                    company=None,
+                    location=None,
+                    remote_type=None,
+                    seniority="senior",
+                    min_years_experience=None,
+                    model_dump=lambda mode=None: {"skills": []},
+                ),
+            )
+            monkeypatch.setattr(tasks, "embed_text", lambda _t: [0.0] * 384)
+
+            tasks._prepare_posting(pid)
+
+            db = SessionLocal()
+            try:
+                row = db.get(JobPosting, pid)
+                assert row.title == "Staff Backend Engineer"
+                assert row.company == "Acme"
+                # What the extraction *did* find still lands.
+                assert row.seniority == "senior"
+            finally:
+                db.close()
+        finally:
+            db = SessionLocal()
+            try:
+                db.query(JobPosting).filter(JobPosting.id == pid).delete()
+                db.commit()
+            finally:
+                db.close()

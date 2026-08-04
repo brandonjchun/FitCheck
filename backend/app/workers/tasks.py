@@ -489,12 +489,30 @@ def _prepare_posting(posting_id: int) -> str | None:
                 # Promoted columns, written in the same commit as the blob so
                 # the two cannot disagree about which extraction produced
                 # them. These are what M9's feed filters on.
-                posting.title = extracted.title
-                posting.company = extracted.company
-                posting.location = extracted.location
-                posting.remote_type = extracted.remote_type
-                posting.seniority = extracted.seniority
-                posting.min_years = extracted.min_years_experience
+                #
+                # `or` rather than plain assignment, and it is a bug fix rather
+                # than defensiveness. A board API states the title as
+                # structured data; the LLM infers it from prose and returns
+                # null whenever the description has no header -- which is most
+                # of them. Assigning unconditionally therefore *destroyed* a
+                # reliable value and replaced it with nothing, and the whole
+                # feed rendered as "Untitled posting". Measured after the first
+                # backfill: 0 of 98 Ashby postings kept a title, while the one
+                # board that had not been extracted yet kept 117 of 125.
+                #
+                # Spec section 9 item 3 already made this call for a different
+                # reason -- prefer the API's structured fields over parsing --
+                # and it applies just as well to an LLM as to an HTML scraper.
+                posting.title = extracted.title or posting.title
+                posting.company = extracted.company or posting.company
+                posting.location = extracted.location or posting.location
+                posting.remote_type = extracted.remote_type or posting.remote_type
+                posting.seniority = extracted.seniority or posting.seniority
+                posting.min_years = (
+                    extracted.min_years_experience
+                    if extracted.min_years_experience is not None
+                    else posting.min_years
+                )
                 posting.extraction_version = POSTING_EXTRACTION_VERSION
                 db.commit()
 
@@ -955,6 +973,12 @@ def _ingest_inline_posting(
                     "raw_text": posting.content,
                     "source_updated_at": posting.updated_at,
                     "last_seen_at": func.now(),
+                    # Refreshed on every re-crawl, not just on insert. The
+                    # board is the authority on its own posting's title, so a
+                    # renamed role should follow -- and this is also what
+                    # repairs rows whose title an earlier extraction nulled
+                    # out, without needing a migration to do it.
+                    "title": posting.title,
                     # Changed content invalidates the old extraction. Clearing
                     # the version is what makes `extraction_is_current` false
                     # and gets it re-extracted, rather than leaving stale
