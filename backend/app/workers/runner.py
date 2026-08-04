@@ -98,6 +98,48 @@ class LoggingWorker(Worker):
             rq_logger.handlers = []
             rq_logger.propagate = True
 
+        self._preload_embedding_model()
+
+    @staticmethod
+    def _preload_embedding_model() -> None:
+        """Load the sentence-transformer once, in the parent process.
+
+        RQ forks a child per job on Linux, and a fork does not inherit work
+        the parent never did. `app.embeddings.get_model()` caches at module
+        level, so with no preload every child starts cold and pays the full
+        model load -- measured at roughly 7 seconds of a 10 second job, which
+        is to say most of a catalog backfill is spent loading the same 90 MB
+        of weights over and over.
+
+        Loading it here means the pages are already resident when the fork
+        happens, and copy-on-write hands them to the child for free. The cost
+        moves to one-off startup and the per-job cost becomes the inference it
+        was supposed to be.
+
+        Deliberately not `SimpleWorker`, which would also fix this by running
+        jobs in-process: that trades away the crash isolation forking provides,
+        and this code runs model output and parses untrusted documents.
+
+        Failure here is logged and swallowed. A worker that cannot preload is
+        slow; a worker that refuses to start is down, and the first is much
+        better than the second.
+        """
+        import logging as _logging
+
+        try:
+            from app.embeddings import get_model
+
+            get_model()
+            _logging.getLogger(__name__).info(
+                "preloaded embedding model into the worker parent process"
+            )
+        except Exception:
+            _logging.getLogger(__name__).warning(
+                "could not preload the embedding model; jobs will load it "
+                "individually and run slower",
+                exc_info=True,
+            )
+
     def perform_job(self, job: Job, queue: Queue) -> bool:
         bind_context(
             job_id=job.id,
