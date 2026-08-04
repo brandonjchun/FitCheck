@@ -206,18 +206,28 @@ class TestBlend:
     def test_weights_sum_to_one(self) -> None:
         assert SEMANTIC_WEIGHT + SKILL_WEIGHT == pytest.approx(1.0)
 
-    def test_skill_is_weighted_above_semantic(self) -> None:
-        """Hard requirements are more decision-relevant than theme. A
-        recruiter rejects on a missing must-have, not on prose that reads
-        slightly off-topic."""
-        assert SKILL_WEIGHT > SEMANTIC_WEIGHT
+    def test_semantic_is_weighted_above_skill(self) -> None:
+        """Inverted at scorer v2. Skill overlap is the sharper signal but the
+        more brittle one -- it is only ever as good as the extraction under
+        it, and a loosely-worded posting or one missed requirement produces a
+        confidently low score for a role that fits. Semantic similarity
+        degrades more gently under the same noise, which is what a ranking
+        wants. The skill breakdown still explains the placement.
+        """
+        assert SEMANTIC_WEIGHT > SKILL_WEIGHT
 
     def test_a_missing_requirement_outweighs_a_close_read(self) -> None:
-        """The property the whole 0.4/0.6 split exists to produce.
+        """Survives the v2 inversion, and only just -- which is the point.
 
-        An embedding barely moves when one skill is absent -- a resume can
-        sit very close to a job it is not qualified for -- so without this
-        ordering the semantic half would quietly decide the ranking.
+        An embedding barely moves when one skill is absent, so a resume can
+        sit very close to a job it is not qualified for. At 0.4/0.6 this
+        ordering held by a wide margin. At 0.6/0.4 it holds by 0.01, and the
+        assertion below is doing real work rather than restating arithmetic:
+        weighting semantic any higher inverts it, and a thematically-close
+        candidate missing every requirement would outrank a qualified one.
+
+        That makes this the test that fails first if the weights drift again,
+        which is exactly the tripwire wanted around a hand-set constant.
         """
         thematic_but_unqualified = blend(0.95, 0.0)
         offbeat_but_qualified = blend(0.30, 1.0)

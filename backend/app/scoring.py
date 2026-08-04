@@ -17,11 +17,12 @@ a job in embedding space while missing the single mandatory skill, because
 `skill` is explicit set overlap over required skills. It is the half that can
 say no.
 
-Blended 0.4/0.6 in favour of skill. That weighting is a judgment call and is
-labelled as one -- there is no labelled data here to derive it from, and
-claiming otherwise would be the kind of unearned precision this project
-avoids. What makes it defensible is that both halves and the full breakdown
-are always surfaced, so the number is inspectable rather than oracular.
+Blended 0.6/0.4 in favour of semantic similarity. That weighting is a
+judgment call and is labelled as one -- there is no labelled data here to
+derive it from, and claiming otherwise would be the kind of unearned
+precision this project avoids. What makes it defensible is that both halves
+and the full breakdown are always surfaced, so the number is inspectable
+rather than oracular.
 
 **Three buckets, not two.** matched / missing / partial, where partial means
 the candidate has the skill but not the years the posting asks for. Two
@@ -38,6 +39,9 @@ from typing import Literal
 #
 #   1 -- initial: weighted required/preferred overlap, 0.4/0.6 blend, MiniLM
 #        embeddings at 384 dimensions.
+#   2 -- blend inverted to 0.6/0.4 in favour of semantic. Overlap rules,
+#        bucket credits, and the embedding model are unchanged; only the
+#        weights moved, which is enough to make a v1 score incomparable.
 #
 # Bumped whenever the blend weights, the bucket credits, or the embedding
 # model change -- anything that makes an old score incomparable to a new one.
@@ -49,19 +53,28 @@ from typing import Literal
 # read, so the next score picks it up with no re-run, and the stored ones
 # stay comparable because the change is monotone -- the same reasoning that
 # keeps alias edits out of the extraction versions.
-SCORER_VERSION = 1
+SCORER_VERSION = 2
 
 # Weights for the blend. Named rather than inlined so the number appearing in
 # a stored score can be traced to a decision.
 #
-# Hard requirements outrank thematic similarity because they are more
-# decision-relevant: a recruiter rejects on a missing must-have, not on a
-# resume that reads slightly off-theme. With labelled `match_feedback` this
-# is exactly the coefficient a learning-to-rank model would fit -- which is
-# the honest answer to "why 0.4?" and the reason the feedback table exists
-# before anything reads it.
-SEMANTIC_WEIGHT = 0.4
-SKILL_WEIGHT = 0.6
+# Inverted from the original 0.4/0.6 at v2. The first weighting reasoned that
+# hard requirements outrank thematic similarity because a recruiter rejects on
+# a missing must-have. That is still true of a *hiring* decision, but this
+# blend does not make one -- it ranks a discovery feed, and the failure modes
+# there are not symmetric. Skill overlap is only as good as the extraction
+# behind it: a posting that lists its requirements loosely, or an extractor
+# that misses one, produces a confidently low skill score for a role that fits
+# fine. Semantic similarity degrades more gracefully under the same noise.
+# Leaning on the sturdier signal for ranking, while the skill breakdown stays
+# fully surfaced as the thing that explains *why* a posting placed where it
+# did, is the trade this version makes.
+#
+# Still a judgment call, and still the coefficient a learning-to-rank model
+# would fit from labelled `match_feedback` -- which is why that table is
+# collected before anything reads it.
+SEMANTIC_WEIGHT = 0.6
+SKILL_WEIGHT = 0.4
 
 # How much a preferred skill counts against a required one.
 #

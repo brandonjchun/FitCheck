@@ -27,6 +27,10 @@ from app.boards import (
 )
 from app.workers.fetch import PermanentFetchError
 
+# `content` is HTML-escaped exactly as the live API returns it -- a string
+# whose *characters* are `&lt;p&gt;`, not `<p>`. Writing the fixture in the
+# convenient form instead would make the decode test vacuous, since a stripper
+# run on already-unescaped markup passes either way.
 GREENHOUSE = {
     "jobs": [
         {
@@ -34,12 +38,14 @@ GREENHOUSE = {
             "absolute_url": "https://job-boards.greenhouse.io/anthropic/jobs/5101378008",
             "title": "Account Executive, Public Sector",
             "updated_at": "2026-07-14T18:35:00-04:00",
+            "content": "&lt;div&gt;&lt;p&gt;Sell to the public sector.&lt;/p&gt;&lt;/div&gt;",
         },
         {
             "id": 4444,
             "absolute_url": "https://job-boards.greenhouse.io/anthropic/jobs/4444",
             "title": "Research Engineer",
             "updated_at": "2026-07-20T09:00:00-04:00",
+            "content": "&lt;p&gt;Train &amp;amp; evaluate models.&lt;/p&gt;",
         },
     ]
 }
@@ -118,12 +124,38 @@ class TestGreenhouse:
         assert updated.tzinfo is not None
         assert updated.hour == 22  # 18:35-04:00 is 22:35Z
 
-    def test_carries_no_inline_content(self, payload) -> None:
-        """Greenhouse omits descriptions unless asked, so these postings must
-        be fetched individually -- which is what `updated_at` then gates."""
+    def test_carries_inline_content(self, payload) -> None:
+        """`?content=true` is what keeps a new board off the per-posting
+        fetch path, so every row must arrive with its description."""
         payload(GREENHOUSE)
 
-        assert all(p.content is None for p in enumerate_greenhouse("anthropic"))
+        assert all(p.content for p in enumerate_greenhouse("anthropic"))
+
+    def test_content_is_unescaped_before_stripping(self, payload) -> None:
+        """The trap this board carries alone. Greenhouse escapes its HTML, so
+        the stripper has to unescape first -- run once on the raw string it
+        yields the markup as literal text, and every skill, keyword, and
+        content hash downstream then matches on angle brackets rather than
+        prose. Nothing else fails; the text is simply wrong forever.
+        """
+        payload(GREENHOUSE)
+
+        text = enumerate_greenhouse("anthropic")[0].content
+
+        assert text is not None
+        assert "Sell to the public sector." in text
+        # Neither the escaped form nor the decoded-but-unstripped form.
+        for leak in ("&lt;", "&gt;", "&quot;", "<div>", "<p>"):
+            assert leak not in text
+
+    def test_a_posting_with_no_body_falls_back_to_fetching(self, payload) -> None:
+        """An empty `content` must leave `content` None rather than "", or the
+        ingest side reads a blank description as a real one and hashes it --
+        skipping the per-posting fetch that would have found the actual text.
+        """
+        payload({"jobs": [{**GREENHOUSE["jobs"][0], "content": ""}]})
+
+        assert enumerate_greenhouse("anthropic")[0].content is None
 
     def test_rows_missing_an_id_or_url_are_dropped(self, payload) -> None:
         payload({"jobs": [{"title": "Broken"}, *GREENHOUSE["jobs"]]})

@@ -13,26 +13,31 @@ fallback for `careers_page` sources, not the default.
 job of this module. Verified against live responses:
 
     board       change signal        inline content
-    ---------   ------------------   --------------
-    Greenhouse  `updated_at` (ISO)   no
+    ---------   ------------------   -------------------------
+    Greenhouse  `updated_at` (ISO)   `content`, HTML-escaped
     Lever       none                 `descriptionPlain`
     Ashby       none                 `descriptionPlain`
 
-That table decides how much work a re-crawl costs, and it decides it
-differently per board:
+That table decides how much work a re-crawl costs, and since all three now
+carry content inline, **a crawl of any board here is one HTTP request,
+total.** There is never a per-posting fetch on the happy path, which makes
+every board faster and politer than anything we could manage by being clever
+about which pages to request.
 
-- **Lever and Ashby hand back the full description in the listing**, so a
-  crawl of either is *one HTTP request, total*. There is never a per-posting
-  fetch, which makes them both faster and politer than anything we could do
-  by being clever.
-- **Greenhouse does not**, but it does say when each posting last changed. So
-  a re-crawl fetches only postings that are new or whose `updated_at` moved
-  -- which on a stable board is a handful rather than four hundred.
+Greenhouse is the one that had to be argued into that column -- it needs
+`?content=true`, which this module used to refuse. See `enumerate_greenhouse`
+for the measurement that changed the answer, and for the escaping trap that
+comes with it.
+
+Greenhouse also uniquely publishes a change signal, which is still worth
+having: `updated_at` lets the ingest side skip an unchanged posting *before*
+hashing it, where the content hash can only skip after.
 
 Neither shortcut costs closure detection, because closures are derived from
 what is *absent from the enumeration*, not from what was fetched.
 """
 
+import html
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -143,35 +148,61 @@ def _iso(value: str | None) -> datetime | None:
 
 
 def enumerate_greenhouse(board_token: str) -> list[DiscoveredPosting]:
-    """Greenhouse: ids, URLs, titles, and `updated_at`. No descriptions.
+    """Greenhouse: ids, URLs, titles, `updated_at`, and inline descriptions.
 
     `boards-api.greenhouse.io` rather than `boards.greenhouse.io/embed/...`,
     and that is a compliance decision rather than a preference: the embed
     path is `Disallow`ed in Greenhouse's robots.txt, verified against the
     live file. The API host is not.
 
-    `?content=true` would return descriptions inline and make this one
-    request like the others -- measured at 5.8 MB for 399 postings. It is not
-    used because `updated_at` already reduces a re-crawl to only what
-    changed, which is cheaper than moving 5.8 MB every day to discover that
-    nothing did.
+    **`?content=true`, which this used to refuse.** The original reasoning was
+    that `updated_at` already narrows a re-crawl to what changed, so paying
+    ~5.8 MB daily to learn that nothing did was the worse trade. That
+    optimizes the steady state and ignores the cold one -- and the cold state
+    is exactly what adding a board means. Measured against the live API:
+
+        anthropic   394 jobs   5.7 MB   0.3s
+        stripe      546 jobs   4.1 MB   0.2s
+
+    Against the alternative, which is one fetch per posting through a 1 rps
+    per-domain bucket that every Greenhouse board shares: Stripe's first
+    crawl is nine minutes of rate-limited fetching, or one request taking two
+    tenths of a second. `updated_at` is still parsed and still useful -- the
+    ingest side uses it to skip unchanged postings before hashing -- but it is
+    no longer the only thing standing between a new board and a backlog.
+
+    Note the double-decode. Greenhouse returns the description **HTML-escaped**,
+    so `content` is a string of `&lt;div&gt;...`. Running the HTML stripper on
+    that once yields the markup as literal text -- tags and all -- and every
+    downstream keyword, skill, and hash then matches against angle brackets
+    instead of prose. It has to be unescaped first, then stripped.
     """
     payload = _get_json(
-        f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs"
+        f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
     )
     if not isinstance(payload, dict) or "jobs" not in payload:
         raise PermanentFetchError(f"unexpected Greenhouse payload for {board_token!r}")
 
-    return [
-        DiscoveredPosting(
-            external_id=str(job["id"]),
-            url=job["absolute_url"],
-            title=job.get("title"),
-            updated_at=_iso(job.get("updated_at")),
+    postings = []
+    for job in payload["jobs"]:
+        if not job.get("id") or not job.get("absolute_url"):
+            continue
+        raw = job.get("content")
+        # unescape before html_to_text -- see the docstring. Guarded rather
+        # than assumed: a posting with an empty body leaves `content` None and
+        # falls back to the per-posting fetch, which is the old behaviour and
+        # still correct for that one row.
+        content = html_to_text(html.unescape(raw)) if raw else None
+        postings.append(
+            DiscoveredPosting(
+                external_id=str(job["id"]),
+                url=job["absolute_url"],
+                title=job.get("title"),
+                updated_at=_iso(job.get("updated_at")),
+                content=content or None,
+            )
         )
-        for job in payload["jobs"]
-        if job.get("id") and job.get("absolute_url")
-    ]
+    return postings
 
 
 def enumerate_lever(board_token: str) -> list[DiscoveredPosting]:
