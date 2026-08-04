@@ -100,18 +100,35 @@ def _where_clauses(filters: FeedFilters) -> tuple[list[str], dict]:
     # extraction has no skill evidence at all: there is no honest score to
     # give it, only a rank to withhold until there is.
     #
-    # `jsonb_typeof(...) = 'object'` rather than the obvious
-    # `extracted IS NOT NULL`, and the difference is not pedantry. SQLAlchemy
-    # persists a Python `None` into a JSONB column as the JSON value `null`,
-    # not as SQL NULL -- so a row written with `extracted=None` satisfies
-    # `IS NOT NULL` while `JobPosting.skills` still returns [], which is
-    # precisely the combination this filter exists to exclude. Testing the
-    # JSON type instead catches SQL NULL, JSON null, and a stray scalar in
-    # one predicate, and it cannot be fooled by however the row was written.
+    # The predicate is `extraction_version IS NOT NULL`, and arriving at that
+    # took two corrections worth recording, because both of the more obvious
+    # spellings are wrong in ways that do not raise.
+    #
+    # `extracted IS NOT NULL` is wrong on *correctness*. SQLAlchemy persists a
+    # Python `None` into a JSONB column as the JSON value `null`, not as SQL
+    # NULL, so a row written with `extracted=None` satisfies `IS NOT NULL`
+    # while `JobPosting.skills` still returns [] -- exactly the combination
+    # this filter exists to exclude.
+    #
+    # `jsonb_typeof(extracted) = 'object'` fixes that and is wrong on
+    # *performance*, which is worse because it is invisible. Postgres has no
+    # statistics for an opaque function call, estimates ~46 matching rows out
+    # of 10,000, and on that estimate concludes a sequential scan is cheaper
+    # than the HNSW index. The query then returns identical results, slightly
+    # slower, with the index sitting there unused -- measured at 10k rows in
+    # `scripts/bench_recall.py`, which is the reason that script asserts on
+    # the plan rather than trusting a timing.
+    #
+    # `extraction_version` is a plain integer column, so the planner has real
+    # statistics and uses the index. It is also the *honest* spelling of the
+    # question: models.py writes the version in the same commit as the blob
+    # specifically so the two cannot disagree, which makes "has a version" the
+    # authoritative answer to "has an extraction" -- and it is NULL for the
+    # JSON-null case too, so the correctness fix survives.
     clauses = [
         "closed_at IS NULL",
         "embedding IS NOT NULL",
-        "jsonb_typeof(extracted) = 'object'",
+        "extraction_version IS NOT NULL",
     ]
     params: dict = {}
 

@@ -179,9 +179,18 @@ class TestRecallEligibility:
         assert catalog.mine(_recall_ids(_vec(1.0))) == []
 
     def test_ordering_is_by_similarity(self, catalog):
+        """All three stay strongly aligned with the query, differing by degree.
+
+        An orthogonal "far" posting would be the natural way to write this and
+        is quietly wrong against a real database: its similarity is 0, real
+        catalog postings score small positive values, and once the catalog
+        exceeds RECALL_LIMIT the orthogonal one is pushed out of the window
+        entirely. The test would then fail for a reason that has nothing to do
+        with ordering.
+        """
         near = catalog.make("near", _vec(1.0, 0.0), extracted=_skills("Python"))
-        mid = catalog.make("mid", _vec(0.7, 0.7), extracted=_skills("Python"))
-        far = catalog.make("far", _vec(0.0, 1.0), extracted=_skills("Python"))
+        mid = catalog.make("mid", _vec(0.95, 0.31), extracted=_skills("Python"))
+        far = catalog.make("far", _vec(0.9, 0.44), extracted=_skills("Python"))
 
         assert catalog.mine(_recall_ids(_vec(1.0, 0.0))) == [near, mid, far]
 
@@ -244,7 +253,11 @@ class TestScoreProfile:
         self, catalog, scored_profile
     ):
         good = catalog.make("good", _vec(1.0), extracted=_skills("Python"))
-        bad = catalog.make("bad", _vec(0.0, 1.0), extracted=_skills("Fortran", "COBOL"))
+        # Aligned with the query but demanding skills the profile lacks, so
+        # the two are separated by the *rerank* rather than by recall. Making
+        # it orthogonal instead would push it out of the recall window on a
+        # populated catalog and the test would pass without reranking anything.
+        bad = catalog.make("bad", _vec(0.93, 0.37), extracted=_skills("Fortran", "COBOL"))
 
         assert tasks.score_profile(scored_profile) == "scored"
 
