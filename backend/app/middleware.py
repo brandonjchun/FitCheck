@@ -5,6 +5,8 @@ because BaseHTTPMiddleware buffers the request body before handing it on --
 which is exactly the thing a size cap exists to prevent.
 """
 
+from uuid import uuid4
+
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 # 2 MB. A text PDF resume is well under 1 MB; 2 leaves headroom for one with
@@ -134,3 +136,76 @@ class BodySizeLimitMiddleware:
             }
         )
         await send({"type": "http.response.body", "body": body})
+
+
+class RequestContextMiddleware:
+    """Bind a request id to the logging context for the life of one request.
+
+    The point is correlation. Without it, three log lines from three modules
+    handling the same request are indistinguishable from three lines handling
+    three different requests -- and under any concurrency at all, they arrive
+    interleaved. With it, the whole request is one filter away.
+
+    **The id is accepted from the client when offered.** A load balancer or
+    the frontend may already have stamped `X-Request-ID`, and generating a
+    fresh one here would break the chain at exactly the boundary the header
+    exists to cross. The value is length-capped and stripped of anything
+    non-printable before use: it goes into log output, and an unbounded
+    client-controlled string in a log file is how log injection works.
+
+    **Cleared in a `finally`.** contextvars are reused across requests by the
+    event loop, so a leaked id would be stamped on an unrelated request --
+    a confidently wrong correlation, which is worse than none.
+
+    Raw ASGI rather than BaseHTTPMiddleware for the reason in the module
+    docstring: BaseHTTPMiddleware buffers the body, and it sits in front of
+    the size cap.
+    """
+
+    # Long enough for a UUID or a trace id, short enough that it cannot be
+    # used to write a paragraph into the logs.
+    MAX_ID_LENGTH = 64
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        from app.logging_setup import bind_context, clear_context
+
+        request_id = self._incoming_id(scope) or uuid4().hex
+
+        bind_context(
+            request_id=request_id,
+            method=scope.get("method", ""),
+            path=scope.get("path", ""),
+        )
+
+        async def send_with_id(message: Message) -> None:
+            # Echoed back so a caller can quote the id when reporting a
+            # problem, which is the difference between "it broke" and a
+            # one-query lookup.
+            if message["type"] == "http.response.start":
+                headers = message.setdefault("headers", [])
+                headers.append((b"x-request-id", request_id.encode("ascii", "ignore")))
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_id)
+        finally:
+            clear_context()
+
+    def _incoming_id(self, scope: Scope) -> str | None:
+        for name, value in scope.get("headers", []):
+            if name == b"x-request-id":
+                candidate = value.decode("latin-1", "ignore").strip()
+                # Printable ASCII only. A newline here would let a client
+                # forge whole log lines.
+                cleaned = "".join(
+                    c for c in candidate if c.isprintable() and c.isascii()
+                )
+                return cleaned[: self.MAX_ID_LENGTH] or None
+        return None

@@ -8,8 +8,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.middleware import BodySizeLimitMiddleware
+from app.logging_setup import configure_logging
+from app.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
 from app.routers import auth, batches, jobs, matches, ops, profiles
+
+# Before the app object exists, so that anything logged during router import
+# is already formatted. Configuring inside a startup hook would leave import
+# time output going through whatever uvicorn installed.
+configure_logging()
 
 app = FastAPI(
     title="FitCheck",
@@ -22,6 +28,12 @@ app = FastAPI(
 # zip and can decompress far past the cap; that gets handled by worker job
 # timeouts once parsing moves off the request path.
 app.add_middleware(BodySizeLimitMiddleware)
+
+# Stamps a request id onto every log line the request produces. Added after
+# BodySizeLimitMiddleware, which means it runs *before* it -- Starlette applies
+# middleware in reverse registration order -- so a request rejected for being
+# oversized is still logged with an id.
+app.add_middleware(RequestContextMiddleware)
 
 # The frontend runs on a different origin from the API in development, and a
 # session cookie is not sent cross-origin without this.

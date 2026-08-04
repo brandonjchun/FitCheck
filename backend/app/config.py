@@ -251,6 +251,24 @@ class Settings(BaseSettings):
     # session.
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
+    # --- Logging --------------------------------------------------------
+    #
+    # Two knobs rather than one "debug" flag, because the level and the shape
+    # of a log line are independent choices: chasing a bug in production means
+    # turning the level down to DEBUG while keeping JSON, and a boolean would
+    # force those together.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
+    # `console` is the coloured, human-aligned renderer; `json` is one object
+    # per line for a log shipper to parse.
+    #
+    # Default is `console` because the common case for this project is a
+    # person reading `docker compose logs`, and JSON is materially worse to
+    # read unaided. Anything collecting these centrally should set `json` --
+    # that is the whole reason the renderer is configurable rather than
+    # chosen once at import.
+    log_format: Literal["console", "json"] = "console"
+
 
 # Imported as `from app.config import settings` -- constructed once at import
 # time, so validation failures surface at startup.
