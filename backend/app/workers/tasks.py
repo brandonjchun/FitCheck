@@ -949,6 +949,13 @@ def _ingest_inline_posting(
             existing.last_seen_at = func.now()
             existing.closed_at = None
             existing.source_id = source_id
+            # Board metadata is refreshed even on a gate hit, because it costs
+            # nothing: it arrived with the listing we already have in hand, and
+            # updating it needs no extraction. Without this the gate becomes a
+            # barrier to repair -- a posting whose title an earlier extraction
+            # nulled out can never get it back, since unchanged content means
+            # this branch is the only one it will ever take again.
+            existing.title = posting.title or existing.title
             db.commit()
             _record_gate_hit(canonical_key, hit=True)
             return
