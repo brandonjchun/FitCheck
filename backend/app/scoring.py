@@ -35,6 +35,8 @@ because it is the set of gaps that are arguably negotiable.
 from dataclasses import dataclass, field
 from typing import Literal
 
+from app.skills import canonical_key
+
 # Which generation of scoring rules produced a stored score.
 #
 #   1 -- initial: weighted required/preferred overlap, 0.4/0.6 blend, MiniLM
@@ -190,8 +192,18 @@ def score_skills(
     nothing to fail to meet, and 0.0 would bury every vaguely-worded posting
     beneath every specific one for reasons that have nothing to do with fit.
     """
+    # Keyed on the canonical key rather than the display name, which is a bug
+    # fix rather than a refinement. `normalize_skill` returns an unrecognised
+    # name unchanged, so before this a resume saying "Redis" and a posting
+    # saying "redis" produced two different dict keys and scored as a *missing
+    # required skill* -- and the same for "GraphQL" against "GraphQL API".
+    # Only the ~30 names in the alias map were immune. The candidate was
+    # silently penalised for the posting's capitalisation.
+    #
+    # The stored breakdown still carries the posting's own display name, so
+    # nothing about the explanation changes; only which names count as equal.
     candidate_years: dict[str, float | None] = {
-        item["name"]: _years_of(item) for item in profile_skills
+        canonical_key(item["name"]): _years_of(item) for item in profile_skills
     }
 
     verdicts: list[SkillVerdict] = []
@@ -202,9 +214,10 @@ def score_skills(
 
         necessity = item.get("necessity", "unknown")
         required = _required_years_of(item)
-        held = candidate_years.get(name)
+        key = canonical_key(name)
+        held = candidate_years.get(key)
 
-        if name not in candidate_years:
+        if key not in candidate_years:
             bucket: Bucket = "missing"
         elif required is not None and (held is None or held < required):
             # Has the skill, short of the threshold -- or has it with no

@@ -9,6 +9,8 @@ This module is pure -- no LLM, no database, no network. It is the one piece
 of M2 you can build and test today.
 """
 
+import re
+
 # Maps any alias (lowercased) to its canonical name.
 #
 # Deliberately small. A hand-maintained map that covers the aliases you
@@ -50,6 +52,99 @@ SKILL_ALIASES: dict[str, str] = {
     "restful apis": "REST",
     "ci/cd": "CI/CD",
     "cicd": "CI/CD",
+    "graphql": "GraphQL",
+    "redis": "Redis",
+    "css": "CSS",
+    "html": "HTML",
+    "sql": "SQL",
+}
+
+
+# Words that describe a skill rather than name one.
+#
+# "GraphQL", "GraphQL API", and "graphql-api" are one requirement written
+# three ways, and a posting that says "Machine Learning Frameworks" is asking
+# for machine learning. Stripping these before comparing turns all of those
+# into one key.
+#
+# **This is not the parent-collapsing that `normalize_skill` refuses to do.**
+# The distinction is that every word here is a generic noun -- it narrows
+# nothing. "Native" in "React Native" and "Lambda" in "AWS Lambda" name
+# different technologies, so they stay, and those skills stay distinct. "API"
+# in "GraphQL API" names no technology at all.
+#
+# Kept short for the same reason the alias map is: each entry is a claim that
+# a word carries no meaning in a skill name, and a wrong claim silently merges
+# two real requirements. Anything ambiguous is left out -- "engineering",
+# "design", and "architecture" are all load-bearing in some skill names
+# ("Design Systems" is a real frontend discipline) and are deliberately absent.
+GENERIC_QUALIFIERS: frozenset[str] = frozenset(
+    {
+        "api",
+        "apis",
+        "framework",
+        "frameworks",
+        "library",
+        "libraries",
+        "development",
+        "programming",
+        "experience",
+        "skills",
+        "knowledge",
+        "proficiency",
+        "systems",
+        "technologies",
+        "tooling",
+    }
+)
+
+
+# Split on anything that is not alphanumeric, `+`, `#`, or `.`.
+#
+# Those three survive because they are part of names rather than punctuation
+# between them: "C++", "C#", ".NET", and "Node.js" all lose their identity if
+# split on them. Everything else -- spaces, hyphens, slashes, parentheses --
+# separates tokens, which is what collapses "graphql-api" and "graphql api".
+_TOKENS = re.compile(r"[^a-z0-9+#.]+")
+
+
+def canonical_key(name: str) -> str:
+    """A comparison key that ignores case, punctuation, and filler words.
+
+    The thing two spellings of one skill have in common:
+
+        canonical_key("GraphQL")      -> "graphql"
+        canonical_key("graphql-api")  -> "graphql"
+        canonical_key("GraphQL API")  -> "graphql"
+        canonical_key("Redis")        -> "redis"
+        canonical_key("React Native") -> "reactnative"   (still not "react")
+
+    Not a display name -- it is lowercase and stripped of separators, so
+    `canonical_key("Distributed Systems")` is `"distributed"`, which nobody
+    should ever see. Callers that show a name to a user pick a real spelling;
+    this only decides which spellings are the same thing.
+
+    If a name is made *entirely* of qualifiers ("APIs", "Frameworks") the
+    tokens are kept rather than reduced to the empty string, which would merge
+    every such name into one bucket.
+    """
+    tokens = [token for token in _TOKENS.split(name.strip().lower()) if token]
+    if not tokens:
+        return ""
+
+    meaningful = [token for token in tokens if token not in GENERIC_QUALIFIERS]
+    return "".join(meaningful or tokens)
+
+
+# The alias map indexed by canonical key, built once at import.
+#
+# This is what lets one entry cover a family: "graphql" in SKILL_ALIASES also
+# catches "GraphQL API", "graphql-api", and "GraphQL APIs", because all four
+# reduce to the same key. Without it every spelling would need its own row and
+# the map would grow into the thousand-line unverifiable thing this module's
+# docstring warns against.
+_ALIASES_BY_KEY: dict[str, str] = {
+    canonical_key(alias): canonical for alias, canonical in SKILL_ALIASES.items()
 }
 
 
@@ -139,9 +234,21 @@ def normalize_skill(name: str) -> str:
     different competencies, and merging them would let a candidate match a
     requirement they do not meet -- exactly the false positive the skill
     breakdown in M10 exists to make visible.
+
+    Lookup is tried twice. The exact lowercase form first, so every entry the
+    map has always wins and this stays backwards compatible; then the
+    canonical key, so one entry covers a family --  "graphql" also answers for
+    "GraphQL API", "graphql-api", and "GraphQL APIs".
     """
     cleaned = name.strip()
-    return SKILL_ALIASES.get(cleaned.lower(), cleaned)
+    if not cleaned:
+        return ""
+
+    direct = SKILL_ALIASES.get(cleaned.lower())
+    if direct is not None:
+        return direct
+
+    return _ALIASES_BY_KEY.get(canonical_key(cleaned), cleaned)
 
 
 def normalize_skills(names: list[str]) -> list[str]:

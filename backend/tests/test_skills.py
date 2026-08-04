@@ -9,11 +9,98 @@ token, overlap scoring silently reports a miss on a skill the candidate has.
 import pytest
 
 from app.skills import (
+    GENERIC_QUALIFIERS,
     SKILL_ALIASES,
+    canonical_key,
     normalize_skill,
     normalize_skill_items,
     normalize_skills,
 )
+
+
+class TestCanonicalKey:
+    """The key that decides which spellings are the same requirement.
+
+    Written against names taken from the real catalog. Before this existed,
+    a 50-match feed produced five separate GraphQL rows -- `graphql`,
+    `GraphQL`, `graphql api`, `GraphQL API`, `graphql-api` -- which filled
+    five of the twelve slots on the insights page and hid the fact that
+    GraphQL was by a distance the most common blocking requirement.
+    """
+
+    @pytest.mark.parametrize(
+        "variants",
+        [
+            ["GraphQL", "graphql", "graphql-api", "graphql api", "GraphQL API", "GraphQL APIs"],
+            ["Redis", "redis", "REDIS"],
+            ["Machine Learning", "machine learning", "Machine Learning Frameworks"],
+            ["Distributed Systems", "Distributed systems"],
+            ["Cloud Infrastructure", "Cloud infrastructure"],
+        ],
+    )
+    def test_variants_of_one_skill_share_a_key(self, variants: list[str]) -> None:
+        keys = {canonical_key(name) for name in variants}
+        assert len(keys) == 1, f"expected one key, got {keys}"
+
+    @pytest.mark.parametrize(
+        "child, parent",
+        [
+            ("React Native", "React"),
+            ("AWS Lambda", "AWS"),
+            ("Google BigQuery", "Google"),
+        ],
+    )
+    def test_a_skill_is_not_collapsed_into_its_parent(self, child: str, parent: str) -> None:
+        """The line this module already drew, held.
+
+        Stripping filler words is not the same as merging a sub-technology
+        into its parent. "Native" and "Lambda" name technologies; "API" and
+        "Frameworks" do not. Collapsing the former would let a candidate match
+        a requirement they do not meet -- the false positive the M10 breakdown
+        exists to make visible.
+        """
+        assert canonical_key(child) != canonical_key(parent)
+
+    @pytest.mark.parametrize(
+        "name, expected",
+        [
+            ("C++", "c++"),
+            ("C#", "c#"),
+            (".NET", ".net"),
+            ("Node.js", "node.js"),
+            ("CI/CD", "cicd"),
+        ],
+    )
+    def test_punctuation_that_is_part_of_a_name_survives(self, name, expected) -> None:
+        """`+`, `#`, and `.` are letters here, not separators. Splitting on
+        them would reduce "C++" to "c" and merge it with C."""
+        assert canonical_key(name) == expected
+
+    def test_cplusplus_does_not_become_c(self) -> None:
+        assert canonical_key("C++") != canonical_key("C")
+
+    def test_a_name_made_only_of_filler_keeps_its_tokens(self) -> None:
+        """Otherwise every such name reduces to the empty string and they all
+        merge into one meaningless bucket."""
+        assert canonical_key("APIs") == "apis"
+        assert canonical_key("Frameworks") == "frameworks"
+        assert canonical_key("APIs") != canonical_key("Frameworks")
+
+    def test_blank_input_is_empty(self) -> None:
+        assert canonical_key("   ") == ""
+
+    def test_is_idempotent(self) -> None:
+        """A key fed back in has to survive, or callers cannot key a dict on
+        it and then look up by the same function."""
+        for name in ["GraphQL API", "Redis", "C++", "Node.js"]:
+            assert canonical_key(canonical_key(name)) == canonical_key(name)
+
+    def test_qualifiers_are_lowercase_and_single_words(self) -> None:
+        """The set is matched against already-lowercased tokens, so an entry
+        with a capital or a space could never fire."""
+        for word in GENERIC_QUALIFIERS:
+            assert word == word.lower().strip()
+            assert " " not in word
 
 
 class TestNormalizeSkill:
@@ -79,6 +166,24 @@ class TestNormalizeSkill:
         """
         assert normalize_skill("React Native") == "React Native"
         assert normalize_skill("AWS Lambda") == "AWS Lambda"
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["graphql", "GraphQL", "graphql-api", "graphql api", "GraphQL API", "GraphQL APIs"],
+    )
+    def test_one_alias_entry_covers_a_whole_family(self, raw: str) -> None:
+        """`graphql` is a single row in SKILL_ALIASES and answers for all six.
+
+        This is what keeps the map short. Enumerating every spelling is how it
+        becomes the thousand-line unverifiable thing the module docstring
+        warns against.
+        """
+        assert normalize_skill(raw) == "GraphQL"
+
+    def test_an_unmapped_skill_still_keeps_its_own_spelling(self) -> None:
+        """The key is for comparison, not display. An unrecognised name is
+        returned as written -- a user must never be shown "distributed"."""
+        assert normalize_skill("Distributed Systems") == "Distributed Systems"
 
 
 class TestNormalizeSkills:

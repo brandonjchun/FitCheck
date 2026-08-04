@@ -189,6 +189,62 @@ class TestBreakdown:
         assert score_skills([need(""), need("Python")], [has("Python")]).score == 1.0
 
 
+class TestSpellingDoesNotDecideAMatch:
+    """A posting's capitalisation must not cost a candidate the role.
+
+    This was a live bug. `normalize_skill` returns an unrecognised name
+    unchanged, so only the ~30 names in the alias map were ever compared
+    reliably; for everything else a resume saying "Redis" against a posting
+    asking for "redis" produced two different keys and scored as a *missing
+    required skill*. Comparison now runs on `canonical_key`.
+    """
+
+    @pytest.mark.parametrize(
+        "posting_name, resume_name",
+        [
+            ("redis", "Redis"),
+            ("Redis", "redis"),
+            ("GraphQL API", "GraphQL"),
+            ("graphql-api", "graphql"),
+            ("Distributed systems", "Distributed Systems"),
+            ("Machine Learning Frameworks", "Machine Learning"),
+        ],
+    )
+    def test_variants_of_one_skill_count_as_held(self, posting_name, resume_name) -> None:
+        breakdown = score_skills([need(posting_name)], [has(resume_name)])
+
+        assert breakdown.score == 1.0
+        assert [v.bucket for v in breakdown.verdicts] == ["matched"]
+
+    def test_the_posting_keeps_its_own_wording_in_the_breakdown(self) -> None:
+        """Only which names count as equal changed. The explanation still
+        quotes the posting, because that is what makes it auditable."""
+        breakdown = score_skills([need("GraphQL API")], [has("graphql")])
+
+        assert breakdown.verdicts[0].name == "GraphQL API"
+
+    def test_a_genuinely_absent_skill_is_still_missing(self) -> None:
+        """The guard against over-merging: this must not turn into a scorer
+        that matches everything."""
+        breakdown = score_skills([need("Kubernetes")], [has("Redis")])
+
+        assert breakdown.score == 0.0
+        assert [v.bucket for v in breakdown.verdicts] == ["missing"]
+
+    def test_a_sub_technology_does_not_satisfy_its_parent(self) -> None:
+        """"React" on a resume must not answer a posting asking for "React
+        Native" -- they are different competencies."""
+        assert score_skills([need("React Native")], [has("React")]).score == 0.0
+
+    def test_years_still_apply_across_a_variant(self) -> None:
+        """The merge must not lose the partial bucket on the way."""
+        breakdown = score_skills(
+            [need("GraphQL API", min_years=5)], [has("graphql", years=2)]
+        )
+
+        assert [v.bucket for v in breakdown.verdicts] == ["partial"]
+
+
 class TestNormalizationAssumption:
     def test_comparison_is_exact_on_names(self) -> None:
         """Documents the contract rather than the implementation.
