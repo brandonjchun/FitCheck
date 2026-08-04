@@ -384,6 +384,31 @@ cd backend
 pytest
 ```
 
+**The suite provisions its own database and Redis keyspace.** On the first run
+it creates `fitcheck_test` beside your development database, migrates it with
+`alembic upgrade head`, and uses Redis db `1`. Both are derived from
+`DATABASE_URL` and `REDIS_URL`, so a fresh clone needs no extra configuration;
+`TEST_DATABASE_URL` and `TEST_REDIS_URL` override them for CI.
+
+This is not tidiness. `docker compose up` leaves four workers and a scheduler
+draining `interactive`, `ingest`, `scoring`, and `discovery` against the
+development Redis — so when the tests shared it, those containers **consumed
+jobs the tests had enqueued**, and any worker could bump the `gate:hits`
+counters a test was asserting on. The suite failed a different handful of tests
+on every run while each one passed in isolation. With the split it is six-for-six
+clean, and you can run it without stopping a crawl.
+
+Because the test database is disposable, the session start truncates it and
+flushes the Redis keyspace. Both are guarded: if the test URLs ever resolve to
+the development ones, or the Redis db is `0`, the run aborts before touching
+anything rather than proceeding.
+
+```powershell
+# point somewhere else entirely, e.g. in CI
+$env:TEST_DATABASE_URL = "postgresql+psycopg://ci:pw@localhost:5432/ci_db"
+$env:TEST_REDIS_URL    = "redis://localhost:6379/9"
+```
+
 ---
 
 ## Roadmap

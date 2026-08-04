@@ -44,7 +44,7 @@ from app.db import SessionLocal
 from app.embeddings import EMBEDDING_DIM
 from app.extraction import ExtractedPosting, ExtractedProfile
 from app.models import IngestJob, JobPosting, Match, Profile, User
-from tests.conftest import make_pdf
+from conftest import make_pdf  # noqa: E402  -- same spelling the other suites use
 
 WORKER_LOG_LEVEL = "CRITICAL"
 
