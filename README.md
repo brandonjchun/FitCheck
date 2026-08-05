@@ -409,6 +409,33 @@ $env:TEST_DATABASE_URL = "postgresql+psycopg://ci:pw@localhost:5432/ci_db"
 $env:TEST_REDIS_URL    = "redis://localhost:6379/9"
 ```
 
+### Load test
+
+```powershell
+cd backend
+pip install -r requirements-dev.txt
+locust -f loadtest/locustfile.py --host http://localhost:8000 `
+       --headless -u 60 -r 20 -t 3m --csv loadtest/results/burst
+python -m loadtest.cleanup
+```
+
+Three user classes, weighted 6 : 3 : 1 across the read path, Path A, and
+Path A-bulk — reads outweigh writes because §6.1 puts a human in front of one
+and nobody in front of the other, and a blended percentile over both would
+describe no real user. Queue depth is sampled out of Redis once a second on a
+background greenlet and written to `loadtest/results/queue_depth.csv`.
+
+**Every submitted URL is on `loadtest.invalid`**, a TLD RFC 2606 reserves so it
+can never resolve. Pointing a burst generator at a real job board to measure
+*our* queue would be both rude and a worse experiment — their latency would
+dominate ours and the run would not be repeatable. The submit path still runs in
+full: the row is written, the job is enqueued, a worker picks it up and fails it
+at DNS. So queue depth under load is real and only the fetch is a no-op.
+
+Run the cleanup afterwards. A burst registers a few hundred accounts and
+enqueues a few thousand jobs; left behind, the dead-letter list fills with
+`loadtest.invalid` rows that mask real failures.
+
 ---
 
 ## Roadmap
@@ -430,7 +457,7 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 | 10–11 | **M8** Catalog + crawler | `sources` seeded with 5 boards; `discover` enumerates; fan-out; content-hash hit rate measured; guarded closure detection | ✅ Done — gate hit rate **100%** on a steady-state re-crawl |
 | 12 | **M9** Recommendations | HNSW index; two-stage recall→rerank; `score_profile` job; feed is a pure indexed SELECT; p95 vs exact scan | ✅ Done — **5.8× at 10k rows, 8.9× at 50k** |
 | 13 | **M10** Feed UI + ops | Ranked feed with filters and inline explanation; feedback capture; ops dashboard | ✅ Done |
-| 14 | **M11** Load test + document | Locust burst on all paths; p50/p95/p99; queue depth under load | ⏳ Next |
+| 14 | **M11** Load test + document | Locust burst on all paths; p50/p95/p99; queue depth under load | ✅ Done — **22,777 requests, 0.00% errors, feed p95 18 ms** |
 
 **Ship M1–M7 before touching M8.** A working single-path pipeline that fetches and fails gracefully is a complete, demoable system. A half-built crawler bolted to a queue that can't survive a timeout is not. That ordering was followed.
 
@@ -474,6 +501,27 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 - **Frontend complete through M10.** Landing, sign-in, workspace, ranked feed, insights, saved, and the ops dashboard, all wired to session auth. The batch progress view that M4's definition of done asked for is there too — an aggregate poll per batch rather than one per job, with the bar scaled off the batch's own `total` so a missing job row shows as a short bar instead of rescaling to look finished. 127 component and hook tests, `tsc -b` and `oxlint` clean.
 
   **Nobody has run it and looked at it.** Everything above is verified by typecheck, lint, and tests; layout and spacing are not verified by any of those.
+
+- **M11 complete.** Locust burst across all three paths, weighted 6 : 3 : 1 toward the read path, with queue depth sampled out of Redis once a second underneath. 60 users, 20/s ramp, 3 minutes: **22,777 requests at 126.9 req/s with one failure (0.00%)**.
+
+  | endpoint | p50 | p95 | p99 | reqs |
+  | --- | --- | --- | --- | --- |
+  | `GET /api/matches` (feed) | 10 ms | **18 ms** | 32 ms | 9,161 |
+  | `GET /api/matches` (filtered) | 10 ms | 18 ms | 36 ms | 3,669 |
+  | `GET /api/insights/skill-gaps` | 10 ms | 18 ms | 34 ms | 3,649 |
+  | `GET /api/matches/saved` | 9 ms | 17 ms | 32 ms | 1,834 |
+  | `POST /api/jobs` (submit) | 8 ms | 15 ms | 230 ms | 1,743 |
+  | `POST /api/batches` (create) | 12 ms | 29 ms | 160 ms | 300 |
+  | `POST /api/profiles` (upload) | 180 ms | 310 ms | 330 ms | 42 |
+  | `POST /api/auth/register` | 2,700 ms | 2,900 ms | 2,900 ms | 60 |
+
+  **The feed's read path holds at 18 ms p95 under 51 req/s**, which is the number the second structural rule above is a claim about. `skill-gaps` matches it despite unnesting every stored breakdown, so the aggregation is not the cost it looks like.
+
+  **`interactive` never left zero.** Across 1,743 submissions the user-facing queue had no measurable depth at any sample, while `ingest` peaked at 150 and `scoring` at 252. That is the four-queue split doing precisely what §6.1 designed it for — a user submission never waited behind bulk work — and it is the first time that argument has had a number behind it rather than an assertion.
+
+  **The slow numbers are all deliberate, and worth naming so they are not read as regressions.** Registration at 2.7 s is Argon2id, which is expensive on purpose; it alone accounts for the aggregate p99.9 of 2,700 ms. Upload at 180 ms is local PDF parsing, which is the work the 202-not-201 design moved *off* the LLM path, not onto it.
+
+  A ~215-job catalog backfill was draining on `scoring` throughout, so these are numbers from a system doing background work rather than an idle one.
 
 - **Retry behaviour is proven against a real worker.** `tests/test_retry_integration.py` drives an RQ worker through the whole schedule — transient failure, reschedule, backoff, exhaustion, dead-letter — plus the recovery case, without which every other assertion is also satisfied by a worker that retries and can never succeed.
 
