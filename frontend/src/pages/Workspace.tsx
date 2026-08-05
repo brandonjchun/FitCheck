@@ -16,10 +16,30 @@ import { useMe } from "../hooks/useAuth";
 import "./Workspace.css";
 
 const POLL_MS = 2000;
-/** Extraction measured 26s on Gemini and 57s on a local model, so this is
- *  generous rather than tight. Past it we stop polling and offer a retry
- *  instead of spinning forever against a job that already failed. */
-const EXTRACTION_TIMEOUT_MS = 150_000;
+
+/**
+ * How many polls to give extraction before offering a retry.
+ *
+ * Counted in **polls, not wall-clock milliseconds**, and the difference is a
+ * bug that was observed rather than imagined. The earlier version gave up when
+ * `Date.now() - startedAt` passed 150s. Browsers throttle timers in a
+ * backgrounded tab while `Date.now()` keeps advancing in real time, so a tab
+ * the user alt-tabbed away from could burn the entire budget having asked the
+ * server twice — then stop polling for good and render "no result after 150s"
+ * over an extraction that had finished. Seen in production data: a resume
+ * extracted in 44 seconds, and the retry button was pressed on it 68 minutes
+ * later.
+ *
+ * Counting attempts makes the budget mean what it says: 75 polls is 75 actual
+ * questions asked, whether they took two minutes or twenty.
+ *
+ * 75 × 2s ≈ 150s of foreground polling, which stays generous against the
+ * measured extraction times — 26s on Gemini, 57s on a local model.
+ */
+const MAX_EXTRACTION_POLLS = 75;
+
+/** Only for the elapsed counter the spinner shows. Gates nothing. */
+const EXTRACTION_TIMEOUT_MS = MAX_EXTRACTION_POLLS * POLL_MS;
 
 /* --- Resume upload ---------------------------------------------------- */
 
@@ -115,28 +135,41 @@ function ProfilePanel({ profileId }: { profileId: number }) {
    * that makes a refresh survivable: the panel needs nothing but a number,
    * and the number comes from the server's list instead of from whatever the
    * upload mutation happened to leave in memory. */
-  const { data: current, isError, error } = useQuery({
+  const { data: current, isError, error, dataUpdatedAt, errorUpdatedAt } = useQuery({
     queryKey: ["profile", profileId],
     queryFn: () => profileApi.get(profileId),
+    /* On for this query specifically, against the app-wide default.
+     *
+     * This is the recovery path. Once polling stops there is otherwise no way
+     * back to the truth short of a manual reload, so a user who came back to a
+     * backgrounded tab saw a stale "no result" over an extraction that had long
+     * since finished. A profile is also exactly the kind of resource where a
+     * refetch on focus is cheap and the answer may genuinely have changed while
+     * the user was away. */
+    refetchOnWindowFocus: true,
     refetchInterval: (query) => {
       if (query.state.data?.extraction_ok) return false;
-      if (Date.now() - startedAt > EXTRACTION_TIMEOUT_MS) return false;
+      const asked = query.state.dataUpdateCount + query.state.errorUpdateCount;
+      if (asked >= MAX_EXTRACTION_POLLS) return false;
       return POLL_MS;
     },
   });
 
-  /* A ticking clock, not a value derived during render.
+  /* Attempts, mirrored into state so render can read what refetchInterval
+   * decided on. Both timestamps, because a run of failed requests has to count
+   * toward the budget as well -- otherwise a backend that is down polls
+   * forever. */
+  const [polls, setPolls] = useState(0);
+  useEffect(() => {
+    if (dataUpdatedAt || errorUpdatedAt) setPolls((n) => n + 1);
+  }, [dataUpdatedAt, errorUpdatedAt]);
+
+  /* The elapsed counter, and nothing else now.
    *
-   * The earlier version computed the timeout as `Date.now() - startedAt >
-   * LIMIT` while rendering. That reads correctly and never fires: once the
-   * poll interval returns false the query stops refetching, so nothing
-   * re-renders this component, so the expression is never evaluated again and
-   * the spinner runs forever. A timeout needs something that actually wakes
-   * up at the boundary.
-   *
-   * It doubles as the elapsed counter. A spinner with no number attached is
-   * indistinguishable from a hang -- which is exactly the confusion that a
-   * job stranded on an orphaned queue produced.
+   * A spinner with no number attached is indistinguishable from a hang, which
+   * is the confusion a job stranded on an orphaned queue produced. It used to
+   * drive the timeout as well; that job moved to the poll count, because wall
+   * clock and work done stop agreeing the moment the tab is backgrounded.
    */
   useEffect(() => {
     if (current?.extraction_ok) return;
@@ -147,13 +180,14 @@ function ProfilePanel({ profileId }: { profileId: number }) {
   const reextract = useMutation({
     mutationFn: () => profileApi.reextract(profileId),
     onSuccess: () => {
-      // Restarting the clock is what resumes polling: the query only
+      // Resetting the budget is what resumes polling: the query only
       // re-evaluates refetchInterval after a fetch, and invalidate provides
       // that fetch. Without the reset the fresh attempt would inherit an
-      // already-expired deadline and stop again immediately.
+      // already-spent budget and stop again immediately.
+      setPolls(0);
       setStartedAt(Date.now());
       setElapsedMs(0);
-      queryClient.invalidateQueries({ queryKey: ["profile", profileId] });
+      queryClient.resetQueries({ queryKey: ["profile", profileId] });
     },
   });
 
@@ -173,7 +207,10 @@ function ProfilePanel({ profileId }: { profileId: number }) {
     );
   }
 
-  const timedOut = !current.extraction_ok && elapsedMs > EXTRACTION_TIMEOUT_MS;
+  // Keyed on questions asked, matching what stopped the polling. Reading it
+  // off the clock instead is what let a backgrounded tab claim a timeout it
+  // had not actually waited through.
+  const timedOut = !current.extraction_ok && polls >= MAX_EXTRACTION_POLLS;
   const elapsedSeconds = Math.floor(elapsedMs / 1000);
 
   return (

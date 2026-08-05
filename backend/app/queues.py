@@ -41,10 +41,10 @@ from app.config import settings
 #   ingest       the bulk: batch fan-out, crawler fan-out  minutes to hours
 #   discovery    scheduled board enumeration               minutes
 #
-# `discovery` is declared and currently unused. It is here because M8's
-# scheduler is the only thing that will ever produce it, and an empty list in
-# Redis costs nothing -- whereas renaming queues once workers, compose
-# services, and dashboards refer to them is a change across four places.
+# `discovery` was declared here before it had a producer, on the reasoning that
+# an empty list in Redis costs nothing while renaming a queue once workers,
+# compose services, and dashboards refer to it is a change across four places.
+# M8's scheduler filled it, and `worker-discovery` drains it.
 QUEUE_INTERACTIVE = "interactive"
 QUEUE_SCORING = "scoring"
 QUEUE_INGEST = "ingest"

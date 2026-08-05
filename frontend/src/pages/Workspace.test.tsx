@@ -313,6 +313,46 @@ describe("the profile panel", () => {
 
     expect(await screen.findByRole("alert")).toBeInTheDocument();
   });
+
+  it("does not claim a timeout while it is still asking", async () => {
+    /* The regression this guards is a spurious give-up.
+     *
+     * The panel used to stop polling when `Date.now() - startedAt` passed
+     * 150s. Browsers throttle timers in a backgrounded tab while `Date.now()`
+     * keeps running, so a tab left in the background could burn the whole
+     * budget having asked twice, then render "no result after 150s" over an
+     * extraction that finished. Observed in real data: a resume extracted in
+     * 44 seconds, retry pressed on it 68 minutes later.
+     *
+     * The budget is now counted in polls, so a pending profile that has only
+     * just been asked about must show the spinner, never the retry notice.
+     */
+    vi.mocked(profileApi.get).mockResolvedValue(
+      profile({ extraction_ok: false, skills: [] }) as never,
+    );
+    draw();
+
+    expect(await screen.findByText(/deriving your structured profile/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no result after/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /try extraction again/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never offers a retry for a resume that extracted fine", async () => {
+    vi.mocked(profileApi.get).mockResolvedValue(
+      profile({
+        extraction_ok: true,
+        skills: [
+          { name: "Python", years: 3, source: "experience", evidence: "shipped a service" },
+        ],
+      }) as never,
+    );
+    draw();
+
+    expect(await screen.findByText("Python")).toBeInTheDocument();
+    expect(screen.queryByText(/no result after/i)).not.toBeInTheDocument();
+  });
 });
 
 /* --- job submission ---------------------------------------------------- */
