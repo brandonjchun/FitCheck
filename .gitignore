@@ -64,3 +64,7 @@ logs/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# Load-test output. The numbers that matter are written up in the README;
+# the raw CSVs are per-run and per-machine.
+backend/loadtest/results/

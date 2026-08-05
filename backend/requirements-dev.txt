@@ -1,0 +1,14 @@
+# Development and load-testing dependencies.
+#
+# Kept out of requirements.txt because that file builds the worker image
+# (see Dockerfile). Locust drags in gevent, Flask, pyzmq, and a websocket
+# stack -- none of which a worker needs, all of which would ship in every
+# container and enlarge the attack surface of a process that already parses
+# untrusted documents.
+#
+#   pip install -r requirements-dev.txt
+#
+-r requirements.txt
+
+# M11's load generator. See loadtest/locustfile.py.
+locust==2.46.3
