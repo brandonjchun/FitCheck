@@ -145,17 +145,39 @@ services:
     # DATABASE_URL is a bug that shows up as "some jobs vanish", so sharing
     # one definition is what stops them drifting.
     <<: *worker
-    # `ingest` alone. No fallback to `interactive`, deliberately: the entire
-    # guarantee is that scaling this service up cannot consume capacity a
-    # user-facing submission needs.
+    # `ingest scoring`, in that order. Still no `interactive`, which is the
+    # part that was ever load-bearing: the guarantee is that scaling this
+    # service up cannot consume capacity a user-facing submission needs, and
+    # neither of these queues is user-facing.
     #
-    # Concurrency is the number of processes, so this is the dial to turn when
-    # a 2,000-item batch needs to drain faster:
-    #   docker compose up -d --scale worker-bulk=4
+    # `scoring` was added once the crawler became the thing that fills it.
+    # The queue predates Path B, when its only producer was a profile upload
+    # and one worker was plenty. A crawl inverts that completely: every
+    # discovered posting enqueues an LLM extraction here, so `scoring` becomes
+    # the deepest queue in the system while `ingest` -- cheap fan-out -- runs
+    # dry. Leaving it to `worker-interactive` alone meant one process doing
+    # every extraction while N bulk workers sat idle, which is the exact
+    # head-of-line problem the four queues exist to prevent, one level down.
+    #
+    # Order matters and `ingest` comes first on purpose. Its jobs are cheap
+    # and they *produce* the scoring work, so draining them first keeps the
+    # pipeline fed; grinding scoring first would starve the thing filling it.
+    #
+    # Concurrency is the number of processes, and it should be set against
+    # OLLAMA_NUM_PARALLEL rather than guessed -- extraction is the bottleneck
+    # and it serializes at the daemon, so more workers than Ollama slots just
+    # queue. Measured on an RTX 5070 Ti at NUM_PARALLEL=4: ~970 postings/hour
+    # at concurrency 1, ~1,790 at 8.
+    #
+    #   docker compose up -d --scale worker-bulk=6
+    #
+    # NOTE: --scale is not sticky. A later bare `docker compose up -d` resets
+    # this service to one replica, silently, and the only symptom is the
+    # scoring queue growing faster than it drains.
     command: >
       rq worker --url redis://:${REDIS_PASSWORD}@redis:6379/0
       --worker-class app.workers.runner.LoggingWorker
-      ingest
+      ingest scoring
 
   worker-discovery:
     # Drains `discovery`, which until M8's scheduler landed had no producer

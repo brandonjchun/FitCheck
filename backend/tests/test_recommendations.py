@@ -31,12 +31,13 @@ def _skills(*names: str) -> dict:
 class Catalog:
     """Postings this test created, and only those.
 
-    The dev database is a real one with a crawled catalog in it, so a bare
-    `recall_candidates` call returns other people's rows alongside the
-    fixture's. Every assertion here is therefore scoped through `mine`:
-    tests state what recall does with *these* postings and stay silent about
-    the rest, which is the only form that holds whether the database is empty
-    or has ten thousand rows in it.
+    Tests run against an isolated database (see conftest), but not an empty
+    one -- every other test in the run leaves its postings behind until its
+    own fixture tears them down, and `recall_candidates` has no idea which are
+    whose. Every assertion here is therefore scoped through `mine`: tests state
+    what recall does with *these* postings and stay silent about the rest,
+    which is the only form that holds whether the table has three rows in it
+    or thirty thousand.
     """
 
     def __init__(self):
@@ -332,3 +333,104 @@ class TestScoreProfile:
 
     def test_empty_catalog_returns_cleanly(self, scored_profile):
         assert tasks.score_profile(scored_profile) in {"no_candidates", "scored"}
+
+
+class TestRecallWidth:
+    """`LIMIT n` must actually be able to return n.
+
+    pgvector's `hnsw.ef_search` caps how many candidates the graph search
+    considers, and it defaults to 40. Without widening it, every recall came
+    back with exactly 40 rows no matter what limit was asked for -- silently,
+    with nothing in the plan explaining the number. The two-stage design ran at
+    a fifth of its intended width for as long as that went unnoticed.
+    """
+
+    @pytest.fixture
+    def wide_catalog(self):
+        """More eligible postings than `hnsw.ef_search` defaults to.
+
+        Seeded here rather than skipping when the table happens to be big
+        enough: a regression test that only runs against a populated database
+        is a regression test that does not run. Inserted in one statement with
+        random-ish vectors, because what is under test is how many rows come
+        back, not what they mean.
+        """
+        count = 80
+        db = SessionLocal()
+        created: list[int] = []
+        try:
+            for i in range(count):
+                # Spread along one axis so every row is genuinely a distinct
+                # neighbour rather than 80 copies of the same point.
+                vec = _vec(1.0, i / (count * 2.0))
+                posting = JobPosting(
+                    canonical_key=f"wide:{i}",
+                    url=f"https://wide.invalid/{i}",
+                    content_hash=f"wide-{i}",
+                    raw_text="body",
+                    embedding=vec,
+                    extracted={"skills": []},
+                    extraction_version=POSTING_EXTRACTION_VERSION,
+                )
+                db.add(posting)
+            db.commit()
+            created = [
+                r[0]
+                for r in db.execute(
+                    select(JobPosting.id).where(
+                        JobPosting.canonical_key.like("wide:%")
+                    )
+                ).all()
+            ]
+            yield count
+        finally:
+            db.query(JobPosting).filter(JobPosting.id.in_(created)).delete(
+                synchronize_session=False
+            )
+            db.commit()
+            db.close()
+
+    def test_recall_fills_a_limit_wider_than_the_ef_search_default(
+        self, wide_catalog
+    ):
+        """The regression itself: a limit above 40 must not silently return 40.
+
+        `enable_seqscan = off` is what gives this test teeth, and without it it
+        is worse than useless. `ef_search` only constrains an *index* scan, and
+        at the few dozen rows a test can afford to seed the planner correctly
+        prefers a sequential scan -- which returns every matching row and fills
+        the limit whether or not the widening happened. Verified by removing
+        the fix: the test passed anyway. Forcing the index is what makes the
+        assertion mean what it says.
+        """
+        wanted = 60
+        db = SessionLocal()
+        try:
+            db.execute(text("SET LOCAL enable_seqscan = off"))
+            got = len(recall_candidates(db, _vec(1.0), limit=wanted))
+        finally:
+            db.close()
+
+        assert got == wanted, (
+            f"recall returned {got} for limit={wanted}; hnsw.ef_search is "
+            "capping the candidate list"
+        )
+
+    def test_ef_search_does_not_leak_onto_a_pooled_connection(self):
+        """`SET LOCAL`, not `SET`.
+
+        These sessions come from a pool. A plain `SET` would leave the widened
+        value on the connection for whatever unrelated query borrowed it next
+        -- paying recall's latency cost forever, everywhere, for no reason.
+        """
+        db = SessionLocal()
+        try:
+            recall_candidates(db, _vec(1.0), limit=100)
+            db.commit()
+            after = db.execute(text("SHOW hnsw.ef_search")).scalar_one()
+        finally:
+            db.close()
+
+        assert int(after) == 40, (
+            f"ef_search leaked past the transaction as {after}"
+        )

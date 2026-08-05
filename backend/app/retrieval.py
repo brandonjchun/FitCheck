@@ -150,6 +150,47 @@ def _where_clauses(filters: FeedFilters) -> tuple[list[str], dict]:
     return clauses, params
 
 
+def _set_ef_search(db: Session, limit: int) -> None:
+    """Widen HNSW's candidate list so `LIMIT` can actually be filled.
+
+    **This is the single most consequential line in the module, and its
+    absence was silent.** pgvector's `hnsw.ef_search` defaults to 40 and caps
+    how many candidates the index graph search will consider -- so a query
+    asking for `LIMIT 200` came back with exactly 40 rows, every time, with no
+    error and nothing in the plan saying why. The whole two-stage design ran at
+    a fifth of its intended width: the reranker is supposed to reorder 200
+    candidates, and it was reordering 40.
+
+    Section 8.5 names this as mitigation 2 ("raise `ef_search` ... and `LIMIT`
+    well above the 200 you need"), filed under the post-filtering gotcha. It is
+    the same failure in a different disguise: the number of rows you get back
+    is not the number you asked for, and nothing tells you.
+
+    Measured on the 20k-posting catalog, 30 queries each:
+
+        ef_search   candidates   p50      p95
+        40 (default)      40     1.02ms   1.35ms
+        200              200     2.48ms   3.42ms
+        400              200     3.75ms   5.06ms
+        600              200     5.83ms   6.87ms
+
+    **Set to twice the limit.** 200 is the minimum that fills the window;
+    beyond that the count stops changing and what improves is *which* 200 --
+    a wider graph search finds closer true neighbours. That accuracy is worth
+    paying for here precisely because the rerank exists: a posting the
+    embedding ranked 180th can still win on skills, so the quality of the
+    shortlist propagates into the final ordering rather than being smoothed
+    over. The cost is ~1.6ms on a job that already runs on a worker.
+
+    `SET LOCAL`, not `SET`. These sessions come from a pool, so a plain `SET`
+    would leak this setting into every unrelated query that later borrowed the
+    same connection.
+    """
+    # Interpolated rather than bound, because SET does not accept parameters.
+    # `limit` is an int from a keyword argument, never user text.
+    db.execute(text(f"SET LOCAL hnsw.ef_search = {min(2 * int(limit), 1000)}"))
+
+
 def recall_candidates(
     db: Session,
     embedding: list[float],
@@ -169,6 +210,7 @@ def recall_candidates(
     """
     filters = filters or FeedFilters()
     clauses, params = _where_clauses(filters)
+    _set_ef_search(db, limit)
 
     statement = text(
         f"""
@@ -202,6 +244,9 @@ def explain_recall(
     """
     filters = filters or FeedFilters()
     clauses, params = _where_clauses(filters)
+    # Same widening as the real query, or the plan being explained is not the
+    # plan being run.
+    _set_ef_search(db, limit)
 
     statement = text(
         f"""
