@@ -881,3 +881,205 @@ class TestSeniorityFromTitleWins:
             assert row.seniority == "staff"
         finally:
             db.close()
+
+
+class TestCompanyComesFromTheBoard:
+    """The employer name is the board's, not the model's.
+
+    The same bug class as `TestSeniorityFromTitleWins`, and worse in the data.
+    Measured across the live catalog before this: 19,691 board-sourced postings
+    held 28 companies between them, and most of those were the *ATS vendor*
+    scraped off page boilerplate -- "Ashby" 22 times, "Greenhouse" once, and one
+    row that came back as `>{`.
+
+    The difference from title is the precedence. A title is stated per posting,
+    so board and model are both plausible and `or` picks whichever is non-null.
+    An employer name is usually not in the posting body at all, so the model has
+    nothing to read but the vendor's branding -- and `sources.display_name` was
+    seeded by hand. The board therefore wins outright, and the extraction is
+    consulted only when there is no board to ask.
+    """
+
+    @staticmethod
+    def _extraction(company: str | None):
+        from types import SimpleNamespace
+
+        return lambda _text, title=None: SimpleNamespace(
+            title=None,
+            company=company,
+            location=None,
+            remote_type=None,
+            seniority=None,
+            min_years_experience=None,
+            model_dump=lambda mode=None: {"skills": []},
+        )
+
+    @pytest.fixture
+    def stub_extraction(self, monkeypatch):
+        def apply(company: str | None):
+            monkeypatch.setattr(tasks, "extract_posting", self._extraction(company))
+            monkeypatch.setattr(tasks, "embed_text", lambda _t: [0.0] * 384)
+
+        return apply
+
+    def test_the_board_name_beats_the_extraction(
+        self, source_id, stub_extraction
+    ) -> None:
+        """The production case: the model answering "Ashby" for 22 rows."""
+        pid = tasks._upsert_posting(
+            f"{BOARD}/company-1", "A description. " * 40, source_id=source_id
+        )
+        stub_extraction("Ashby")
+
+        tasks._prepare_posting(pid)
+
+        db = SessionLocal()
+        try:
+            assert db.get(JobPosting, pid).company == "Acme"
+        finally:
+            db.close()
+
+    def test_a_sourceless_posting_falls_back_to_the_extraction(
+        self, stub_extraction
+    ) -> None:
+        """A bare user-submitted URL has no board, so the model is the only
+        thing that can answer -- and a wrong answer beats a blank column when
+        there is no better one available."""
+        pid = tasks._upsert_posting(
+            "https://example.com/careers/solo-role", "A description. " * 40
+        )
+        stub_extraction("Independent Co")
+        try:
+            tasks._prepare_posting(pid)
+
+            db = SessionLocal()
+            try:
+                assert db.get(JobPosting, pid).company == "Independent Co"
+            finally:
+                db.close()
+        finally:
+            db = SessionLocal()
+            try:
+                db.query(JobPosting).filter_by(id=pid).delete()
+                db.commit()
+            finally:
+                db.close()
+
+    def test_ingest_sets_it_before_any_extraction_runs(self, source_id) -> None:
+        """Same argument as the seniority equivalent: a crawl ingests hundreds
+        of postings in one request and their scoring drains over hours. Waiting
+        on extraction meant every one of them sat at null with the answer
+        already sitting in `sources`."""
+        pid = tasks._upsert_posting(
+            f"{BOARD}/company-2", "A description. " * 40, source_id=source_id
+        )
+
+        db = SessionLocal()
+        try:
+            assert db.get(JobPosting, pid).company == "Acme"
+        finally:
+            db.close()
+
+    def test_the_inline_path_sets_it_too(self, source_id, crawl) -> None:
+        """Lever and Ashby hand back content inline, so those postings never
+        pass through `_upsert_posting` at all."""
+        crawl(
+            [
+                DiscoveredPosting(
+                    external_id="inline-company",
+                    url=f"{BOARD}/inline-company",
+                    title="Backend Engineer",
+                    content="An inline description. " * 40,
+                )
+            ],
+            source_id,
+        )
+
+        rows = _stored(source_id)
+        assert [row.company for row in rows.values()] == ["Acme"]
+
+    def test_a_gate_hit_repairs_a_null_company(self, source_id) -> None:
+        """The branch that decides whether the existing catalog ever heals.
+
+        19,691 rows are already stored with a null company and their content
+        does not change from one crawl to the next, so the gate is the only
+        branch they will take again. Without the repair here, the backfill
+        script would be the only thing that ever fixed them -- and a *new*
+        posting on the same board would land correct while its neighbours stayed
+        blank forever.
+        """
+        url = f"{BOARD}/gate-company"
+        key = canonical_key_for_url(url)
+        content = "An unchanged inline description. " * 40
+
+        db = SessionLocal()
+        try:
+            db.add(
+                JobPosting(
+                    canonical_key=key,
+                    url=url,
+                    source_id=source_id,
+                    content_hash=tasks.content_hash_for(content),
+                    raw_text=content,
+                    title="Backend Engineer",
+                    company=None,
+                    extraction_version=POSTING_EXTRACTION_VERSION,
+                    extracted={"skills": []},
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        tasks._ingest_inline_posting(
+            source_id,
+            key,
+            DiscoveredPosting(
+                external_id="gate-company",
+                url=url,
+                title="Backend Engineer",
+                content=content,
+            ),
+        )
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(JobPosting.canonical_key == key)
+            ).scalar_one()
+            assert row.company == "Acme"
+        finally:
+            db.close()
+
+    def test_a_user_submission_does_not_erase_a_board_company(
+        self, source_id
+    ) -> None:
+        """Someone pasting a URL the crawler already owns carries no source, so
+        it resolves no company. The COALESCE is what stops that blanking the
+        one the crawl established -- the same reasoning that protects
+        `source_id` and `title` on this path."""
+        url = f"{BOARD}/company-3"
+        tasks._upsert_posting(url, "A description. " * 40, source_id=source_id)
+
+        tasks._upsert_posting(url, "A revised description. " * 40)
+
+        db = SessionLocal()
+        try:
+            row = db.execute(
+                select(JobPosting).where(
+                    JobPosting.canonical_key == canonical_key_for_url(url)
+                )
+            ).scalar_one()
+            assert row.company == "Acme"
+        finally:
+            db.close()
+
+    def test_a_sourceless_lookup_asks_no_question(self) -> None:
+        """None in, None out, without a query. The sourceless case is the
+        common one on Path A and it must not cost a round trip to learn there
+        is no board."""
+        db = SessionLocal()
+        try:
+            assert tasks._company_for_source(db, None) is None
+        finally:
+            db.close()

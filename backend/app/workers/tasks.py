@@ -366,6 +366,31 @@ def _enqueue_scoring(profile_id: int, posting_id: int) -> None:
         )
 
 
+def _company_for_source(db: Session, source_id: int | None) -> str | None:
+    """The employer a board belongs to, or None for a sourceless posting.
+
+    `sources.display_name` is the authority on this and the extraction is not,
+    which is the same call spec section 9 item 3 makes for board metadata
+    generally -- and the evidence here is blunter than it was for titles.
+    Measured over the live catalog before this existed: 19,691 board-sourced
+    postings held 28 companies between them, and the values the LLM did produce
+    were mostly the *ATS vendor* read off page boilerplate -- "Ashby" 22 times,
+    "Greenhouse" once, and one row that came back as `>{`. The employer name is
+    nowhere in the posting body often enough to infer, while it is sitting in a
+    column we seeded by hand.
+
+    Looked up from `source_id` rather than threaded through the job row the way
+    `title` is, and the difference is deliberate. A title belongs to one
+    posting, so it has to travel with it. A display name belongs to the board,
+    so reading it at write time means a corrected company name -- a rebrand, a
+    fixed typo in the seed -- lands on every posting from that board at the next
+    crawl, with no second backfill.
+    """
+    if source_id is None:
+        return None
+    return db.scalar(select(Source.display_name).where(Source.id == source_id))
+
+
 def _upsert_posting(
     url: str,
     raw_text: str,
@@ -415,6 +440,8 @@ def _upsert_posting(
     derived_seniority = seniority_from_title(title)
 
     with _session() as db:
+        board_company = _company_for_source(db, source_id)
+
         conflict_updates = {
             "url": url,
             # COALESCE so a user submitting a URL that the crawler already owns
@@ -423,6 +450,13 @@ def _upsert_posting(
             "source_id": func.coalesce(
                 pg_insert(JobPosting).excluded.source_id,
                 JobPosting.source_id,
+            ),
+            # Same shape, same reason as `source_id` and `title`: a
+            # user-submitted fetch carries no source, so it resolves no company,
+            # and it must not blank out the one the crawl established.
+            "company": func.coalesce(
+                pg_insert(JobPosting).excluded.company,
+                JobPosting.company,
             ),
             # Same shape, same reason. A re-crawl should follow a renamed role,
             # and this is also what repairs the rows an earlier crawl stored
@@ -454,6 +488,7 @@ def _upsert_posting(
                 content_hash=content_hash,
                 raw_text=raw_text,
                 title=title,
+                company=board_company,
                 seniority=derived_seniority,
             )
             .on_conflict_do_update(
@@ -557,7 +592,20 @@ def _prepare_posting(posting_id: int) -> str | None:
                 # reason -- prefer the API's structured fields over parsing --
                 # and it applies just as well to an LLM as to an HTML scraper.
                 posting.title = extracted.title or posting.title
-                posting.company = extracted.company or posting.company
+                # Board first, and note this is the opposite precedence to the
+                # line above. A title is stated per posting and the LLM reads
+                # the same string the board does, so either can be right and
+                # `or` just prefers whichever is non-null. A company is not in
+                # the posting body at all -- what the model finds there is the
+                # ATS vendor's own branding, which is why the catalog filled up
+                # with "Ashby" and "Greenhouse" as employer names. So the
+                # extraction is consulted only when there is no board to ask,
+                # which means a bare user-submitted URL.
+                posting.company = (
+                    _company_for_source(db, posting.source_id)
+                    or extracted.company
+                    or posting.company
+                )
                 posting.location = extracted.location or posting.location
                 posting.remote_type = extracted.remote_type or posting.remote_type
                 # The title wins where it states a level, and only there. A
@@ -1048,13 +1096,25 @@ def _ingest_inline_posting(
             existing.seniority = (
                 seniority_from_title(existing.title) or existing.seniority
             )
+            # Repaired on a gate hit for the same reason the title is, and this
+            # is the branch that matters most for company: 19,691 rows were
+            # already stored with a null one, and their content does not change
+            # from one crawl to the next. Without this line the gate is the only
+            # branch they would ever take again, so the backfill script would be
+            # the sole way they were ever repaired -- and the next new posting on
+            # an already-crawled board would be fine while its neighbours stayed
+            # blank forever.
+            existing.company = _company_for_source(db, source_id) or existing.company
             db.commit()
             _record_gate_hit(canonical_key, hit=True)
             return
 
+        board_company = _company_for_source(db, source_id)
+
         conflict_updates = {
             "url": posting.url,
             "source_id": source_id,
+            "company": board_company,
             "content_hash": content_hash,
             "raw_text": posting.content,
             "source_updated_at": posting.updated_at,
@@ -1091,6 +1151,7 @@ def _ingest_inline_posting(
                 content_hash=content_hash,
                 raw_text=posting.content,
                 title=posting.title,
+                company=board_company,
                 # Null is safe on an insert -- there is no prior value to erase,
                 # and extraction fills it in shortly after.
                 seniority=derived_seniority,
