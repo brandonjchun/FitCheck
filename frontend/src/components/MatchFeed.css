@@ -106,6 +106,54 @@ a.mf-title:hover {
   color: var(--text-faint);
 }
 
+/* The level gap, directly under the sub-scores because it is the same kind of
+ * claim: a component of the answer rather than the answer. Sized to match them
+ * so it reads as part of that group and not as a third heading. */
+.mf-seniority {
+  margin-top: var(--space-1);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+/* Separators drawn in CSS rather than written into the JSX as " · ", so a
+ * clause that renders nothing cannot leave an orphaned dot behind -- and the
+ * three clauses are independently optional. */
+.mf-seniority > * + *::before {
+  content: "·";
+  margin-right: var(--space-2);
+  color: var(--text-faint);
+}
+
+.mf-seniority-role {
+  text-transform: capitalize;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.mf-seniority-years {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Colour follows the same three-band logic as the score: a stretch role is
+ * worth flagging, a step down is worth noting, a level match is good news.
+ * Text only -- filling these would put a second coloured pill next to the
+ * required-missing chip and start competing with it for the same attention. */
+.mf-seniority[data-direction="under"] .mf-seniority-gap {
+  color: var(--warn);
+}
+
+.mf-seniority[data-direction="over"] .mf-seniority-gap {
+  color: var(--text-faint);
+}
+
+.mf-seniority[data-direction="match"] .mf-seniority-gap {
+  color: var(--ok);
+}
+
 .mf-counts {
   margin-top: var(--space-4);
   display: flex;

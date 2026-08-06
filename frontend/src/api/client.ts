@@ -35,6 +35,8 @@ export type BatchCreated = components["schemas"]["BatchCreateResponse"];
 export type Match = components["schemas"]["MatchResponse"];
 export type MatchSkill = components["schemas"]["MatchSkill"];
 export type SkillBucket = MatchSkill["bucket"];
+export type MatchSeniority = components["schemas"]["MatchSeniority"];
+export type SeniorityDirection = MatchSeniority["direction"];
 
 export type OpsOverview = components["schemas"]["OpsOverview"];
 export type QueueHealth = components["schemas"]["QueueHealth"];

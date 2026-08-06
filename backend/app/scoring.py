@@ -35,6 +35,7 @@ because it is the set of gaps that are arguably negotiable.
 from dataclasses import dataclass, field
 from typing import Literal
 
+from app.seniority import SeniorityDelta
 from app.skills import canonical_key
 
 # Which generation of scoring rules produced a stored score.
@@ -268,6 +269,7 @@ def build_breakdown(
     skill: SkillBreakdown,
     *,
     extraction_failed: bool = False,
+    seniority: SeniorityDelta | None = None,
 ) -> dict:
     """Assemble the JSONB explanation stored on a match.
 
@@ -312,4 +314,34 @@ def build_breakdown(
         # render a confident 0.4 with no skills listed and no way to tell
         # that from a genuine total mismatch.
         "extraction_failed": extraction_failed,
+        # The level gap, alongside the skill gaps rather than folded into
+        # them. Both are answers to "why is this here", and a posting two
+        # rungs above the candidate is the single most useful thing to say
+        # about a match whose skills all tick.
+        #
+        # **This does not bump SCORER_VERSION**, and the rule is the one
+        # stated at that constant: the version tracks whether two stored
+        # scores are comparable. Nothing here reaches `blend` -- the delta is
+        # explanation, and `final_score` is byte-identical with it present or
+        # absent. Same reasoning that keeps a skill-alias addition from
+        # bumping it. Scoring on seniority *would* bump it, and would need
+        # every stored match re-run; that is a separate decision, deliberately
+        # not smuggled in with this one.
+        #
+        # None when the caller had no levels to compare, which is distinct
+        # from a delta whose `direction` is "unknown": the first says nobody
+        # asked, the second says we asked and the data could not answer.
+        "seniority": (
+            None
+            if seniority is None
+            else {
+                "profile_level": seniority.profile_level,
+                "posting_level": seniority.posting_level,
+                "steps": seniority.steps,
+                "direction": seniority.direction,
+                "candidate_years": seniority.candidate_years,
+                "required_years": seniority.required_years,
+                "years_gap": seniority.years_gap,
+            }
+        ),
     }

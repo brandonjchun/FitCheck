@@ -249,6 +249,153 @@ describe("posting identity", () => {
   });
 });
 
+/* --- the level gap ------------------------------------------------------ */
+
+describe("the seniority gap", () => {
+  /* The other half of "why is this here", and invisible in the score by
+   * design -- seniority deliberately does not feed the blend, so if it is not
+   * rendered it is not communicated anywhere at all. */
+
+  const seniority = (over: Partial<Record<string, unknown>> = {}) => ({
+    profile_level: "senior",
+    posting_level: "staff",
+    steps: -1,
+    direction: "under",
+    candidate_years: 8.8,
+    required_years: 5,
+    years_gap: 3.8,
+    ...over,
+  });
+
+  it("names how far above the candidate a stretch role sits", async () => {
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({ seniority: seniority() }),
+    ] as never);
+    draw();
+
+    expect(await screen.findByText(/one level above you/i)).toBeInTheDocument();
+    expect(screen.getByText("staff role")).toBeInTheDocument();
+  });
+
+  it("pluralises a multi-rung gap", async () => {
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({
+        seniority: seniority({ profile_level: "junior", steps: -2 }),
+      }),
+    ] as never);
+    draw();
+
+    expect(await screen.findByText(/two levels above you/i)).toBeInTheDocument();
+  });
+
+  it("says a role below the candidate is below them", async () => {
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({
+        seniority: seniority({
+          posting_level: "junior",
+          steps: 2,
+          direction: "over",
+        }),
+      }),
+    ] as never);
+    draw();
+
+    expect(await screen.findByText(/two levels below you/i)).toBeInTheDocument();
+  });
+
+  it("calls a same-rung role a match", async () => {
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({
+        seniority: seniority({ posting_level: "senior", steps: 0, direction: "match" }),
+      }),
+    ] as never);
+    draw();
+
+    expect(await screen.findByText(/matches your level/i)).toBeInTheDocument();
+  });
+
+  it("shows the years in the same idiom the breakdown uses", async () => {
+    /* SkillRow renders "2 of 5 yrs". A reader should not have to learn a
+     * second phrasing for the same relationship one line up. */
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({ seniority: seniority() }),
+    ] as never);
+    draw();
+
+    expect(await screen.findByText("8.8 of 5 yrs")).toBeInTheDocument();
+  });
+
+  it("says nothing about levels when neither side stated one", async () => {
+    /* 3,434 postings in the live catalog have no seniority. Printing "level
+     * unknown" on all of them is noise on a card already carrying two scores
+     * and four counts. */
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({
+        seniority: seniority({
+          profile_level: null,
+          posting_level: null,
+          steps: null,
+          direction: "unknown",
+        }),
+      }),
+    ] as never);
+    draw();
+
+    expect(await screen.findByText("8.8 of 5 yrs")).toBeInTheDocument();
+    expect(screen.queryByText(/level(s)? (above|below) you/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/matches your level/i)).not.toBeInTheDocument();
+  });
+
+  it("renders nothing at all when there is neither a level nor years", async () => {
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({
+        seniority: seniority({
+          profile_level: null,
+          posting_level: null,
+          steps: null,
+          direction: "unknown",
+          candidate_years: null,
+          required_years: null,
+          years_gap: null,
+        }),
+      }),
+    ] as never);
+    const { container } = draw();
+
+    await screen.findByText(/senior backend engineer/i);
+    expect(container.querySelector(".mf-seniority")).toBeNull();
+  });
+
+  it("renders nothing for a match scored before the field existed", async () => {
+    /* Every one of the 21k stored matches is in this state until re-scored,
+     * and an absent comparison must not be rendered as an unknown one. */
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({ seniority: null }),
+    ] as never);
+    const { container } = draw();
+
+    await screen.findByText(/senior backend engineer/i);
+    expect(container.querySelector(".mf-seniority")).toBeNull();
+  });
+
+  it("still shows the years when only the level is unreadable", async () => {
+    /* The two halves are independent in the API and must stay independent
+     * here: a posting can state a threshold without stating a rung. */
+    vi.mocked(matchApi.list).mockResolvedValue([
+      match({
+        seniority: seniority({
+          posting_level: "unknown",
+          steps: null,
+          direction: "unknown",
+        }),
+      }),
+    ] as never);
+    draw();
+
+    expect(await screen.findByText("8.8 of 5 yrs")).toBeInTheDocument();
+  });
+});
+
 /* --- filters ----------------------------------------------------------- */
 
 describe("the filter bar", () => {

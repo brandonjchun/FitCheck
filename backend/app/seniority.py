@@ -35,6 +35,9 @@ the query that matters. It has to be in the column.
 """
 
 import re
+from dataclasses import dataclass
+from decimal import Decimal
+from typing import Literal
 
 from app.extraction import Seniority
 
@@ -116,3 +119,151 @@ def seniority_from_title(title: str | None) -> Seniority | None:
     if _JUNIOR.search(text):
         return "junior"
     return None
+
+
+# --------------------------------------------------------------------------
+# Comparing a candidate's level against a role's
+# --------------------------------------------------------------------------
+
+# The ladder, weakest first.
+#
+# "unknown" is deliberately absent, and that is the same distinction
+# `seniority_from_title` draws between None and "unknown" one level up. A rung
+# is a claim about where a role sits; "unknown" is a statement that nobody
+# could tell. Ranking it -- anywhere, including as a fifth rung above staff --
+# would let an absence of evidence produce a confident delta, which is exactly
+# the failure this module was written to stop.
+_LADDER: tuple[Seniority, ...] = ("junior", "mid", "senior", "staff")
+
+_RANK: dict[str, int] = {level: index for index, level in enumerate(_LADDER)}
+
+# What the comparison concluded, from the *candidate's* point of view.
+#
+#   match    the candidate sits on the role's rung
+#   under    the role is above them -- a stretch
+#   over     the role is below them -- likely a step down
+#   unknown  one side or both never stated a level
+#
+# A separate field rather than something the UI derives from the sign of
+# `steps`, because "unknown" and "match" both leave `steps` unusable for that:
+# one is None and the other is 0, and a client testing `steps > 0` reads them
+# identically.
+Direction = Literal["match", "under", "over", "unknown"]
+
+
+@dataclass(frozen=True)
+class SeniorityDelta:
+    """The gap between a candidate's level and a posting's, as structure.
+
+    Explanation, not score. Nothing here feeds the blend -- see the note in
+    `scoring.build_breakdown` for why adding it does not bump SCORER_VERSION.
+
+    Both levels are carried even when the delta is unknown, so the UI can say
+    *which* side was missing rather than falling back to silence. "The posting
+    never stated a level" and "we could not read yours" call for different
+    copy, and only the fields distinguish them.
+    """
+
+    profile_level: str | None
+    posting_level: str | None
+    steps: int | None
+    direction: Direction
+    candidate_years: float | None
+    required_years: float | None
+    years_gap: float | None
+
+
+def rank_of(level: str | None) -> int | None:
+    """Where a level sits on the ladder, or None if it names no rung.
+
+        rank_of("junior")   -> 0
+        rank_of("staff")    -> 3
+        rank_of("unknown")  -> None
+        rank_of(None)       -> None
+
+    "unknown" and None collapse to the same answer on purpose. Both columns
+    this reads are `Text` holding a `Seniority`, so "unknown" is a value that
+    genuinely appears in the database -- and it means the same thing as a NULL
+    for every question a caller can ask here.
+    """
+    if level is None:
+        return None
+    return _RANK.get(level)
+
+
+def _as_float(value: Decimal | float | int | None) -> float | None:
+    """Coerce a years figure to a plain float.
+
+    Load-bearing, not defensive. `profiles.years_experience` and
+    `job_postings.min_years` are both `Numeric(4,1)`, so SQLAlchemy hands back
+    `Decimal` -- and `Decimal` mixes with neither of the two things that happen
+    to these numbers next. `Decimal("5.0") - 3.0` raises TypeError, and
+    `json.dumps(Decimal("5.0"))` raises TypeError too, so an uncoerced value
+    would break the subtraction below or the JSONB write in `build_breakdown`
+    depending on which side was missing. Both failures are only reachable with
+    a posting *and* a profile that state years, which is why coercing at the
+    boundary beats hoping the call sites remember.
+    """
+    if value is None:
+        return None
+    return float(value)
+
+
+def seniority_delta(
+    profile_level: str | None,
+    posting_level: str | None,
+    *,
+    candidate_years: Decimal | float | int | None = None,
+    required_years: Decimal | float | int | None = None,
+) -> SeniorityDelta:
+    """Compare a candidate's level and years against a posting's.
+
+        seniority_delta("senior", "senior")  -> steps 0,  direction "match"
+        seniority_delta("mid", "staff")      -> steps -2, direction "under"
+        seniority_delta("staff", "junior")   -> steps 3,  direction "over"
+        seniority_delta("senior", "unknown") -> steps None, direction "unknown"
+
+    `steps` is signed from the candidate's side: negative means the role is
+    above them. That orientation is chosen so the sign matches `years_gap`,
+    which is `candidate - required` and therefore also negative when they fall
+    short. Two gap figures that disagreed on which direction was bad would be
+    read wrong by somebody eventually.
+
+    **The two halves are independent, and both are reported.** A level is a
+    rung the posting named; years is a threshold it set. A posting can state
+    one, the other, both, or neither, and each is useful alone -- so this never
+    infers a level from years or a threshold from a level. That inference is
+    precisely what `seniority_from_title` exists to avoid doing from prose,
+    and doing it here would reintroduce it a layer down.
+    """
+    candidate = _as_float(candidate_years)
+    required = _as_float(required_years)
+
+    profile_rank = rank_of(profile_level)
+    posting_rank = rank_of(posting_level)
+
+    if profile_rank is None or posting_rank is None:
+        steps: int | None = None
+        direction: Direction = "unknown"
+    else:
+        steps = profile_rank - posting_rank
+        if steps == 0:
+            direction = "match"
+        elif steps < 0:
+            direction = "under"
+        else:
+            direction = "over"
+
+    years_gap = None
+    if candidate is not None and required is not None:
+        years_gap = round(candidate - required, 6)
+
+    return SeniorityDelta(
+        profile_level=profile_level,
+        posting_level=posting_level,
+        steps=steps,
+        direction=direction,
+        candidate_years=candidate,
+        required_years=required,
+        years_gap=years_gap,
+    )

@@ -12,6 +12,9 @@ says "a candidate meeting every requirement outranks one missing a mandatory
 skill" survives tuning and fails on the thing that would actually be wrong.
 """
 
+import json
+from decimal import Decimal
+
 import pytest
 
 from app.scoring import (
@@ -20,8 +23,10 @@ from app.scoring import (
     SEMANTIC_WEIGHT,
     SKILL_WEIGHT,
     blend,
+    build_breakdown,
     score_skills,
 )
+from app.seniority import seniority_delta
 
 
 def need(name, necessity="required", min_years=None, evidence="quoted"):
@@ -300,3 +305,100 @@ class TestBlend:
 
     def test_perfect_on_both_is_one(self) -> None:
         assert blend(1.0, 1.0) == pytest.approx(1.0)
+
+
+class TestSeniorityInTheBreakdown:
+    """The level gap travels in the stored explanation.
+
+    `test_seniority_delta.py` covers what the delta *says*; this covers the
+    two promises made by putting it here rather than in the blend.
+    """
+
+    def test_the_delta_is_carried_in_full(self) -> None:
+        """All seven fields, because the UI branches on `direction` but needs
+        the levels to name which side was missing and the years to say by how
+        much."""
+        payload = build_breakdown(
+            0.5,
+            score_skills([], []),
+            seniority=seniority_delta(
+                "mid", "staff", candidate_years=3, required_years=8
+            ),
+        )
+
+        assert payload["seniority"] == {
+            "profile_level": "mid",
+            "posting_level": "staff",
+            "steps": -2,
+            "direction": "under",
+            "candidate_years": 3.0,
+            "required_years": 8.0,
+            "years_gap": -5.0,
+        }
+
+    def test_the_score_does_not_move(self) -> None:
+        """The claim that justifies not bumping SCORER_VERSION.
+
+        The version tracks whether two stored scores are comparable. Nothing in
+        the delta reaches `blend`, so a match scored with it is comparable to
+        one scored without -- and this is the test that fails if somebody later
+        folds seniority into the blend without bumping the version, which would
+        silently make position 3 beat position 4 for reasons the feed cannot
+        explain.
+        """
+        skill = score_skills([need("Python")], [has("Python")])
+
+        without = build_breakdown(0.7, skill)
+        with_delta = build_breakdown(
+            0.7,
+            skill,
+            seniority=seniority_delta(
+                "junior", "staff", candidate_years=1, required_years=10
+            ),
+        )
+
+        for key in ("semantic_score", "skill_score", "final_score"):
+            assert without[key] == with_delta[key]
+
+    def test_a_decimal_delta_survives_json(self) -> None:
+        """The payload is written to JSONB, and `json.dumps` refuses a Decimal.
+        Both year columns are Numeric(4,1), so this is the shape that actually
+        reaches the write -- not a hypothetical."""
+        payload = build_breakdown(
+            0.5,
+            score_skills([], []),
+            seniority=seniority_delta(
+                "senior",
+                "staff",
+                candidate_years=Decimal("4.5"),
+                required_years=Decimal("7.0"),
+            ),
+        )
+
+        assert json.loads(json.dumps(payload))["seniority"]["years_gap"] == -2.5
+
+    def test_omitting_it_stores_null_rather_than_a_fabricated_gap(self) -> None:
+        """A caller with nothing to compare gets None. That is distinct from a
+        delta whose direction is "unknown": the first says nobody asked, the
+        second says we asked and the data could not answer."""
+        assert build_breakdown(0.5, score_skills([], []))["seniority"] is None
+
+    def test_an_unknown_delta_is_stored_rather_than_dropped(self) -> None:
+        """The opposite case, and the reason the two are not collapsed. The
+        comparison ran and failed, which is a thing worth telling the user --
+        and the levels explain why it failed."""
+        payload = build_breakdown(
+            0.5,
+            score_skills([], []),
+            seniority=seniority_delta("senior", None),
+        )
+
+        assert payload["seniority"]["direction"] == "unknown"
+        assert payload["seniority"]["profile_level"] == "senior"
+        assert payload["seniority"]["posting_level"] is None
+
+    def test_the_key_is_always_present(self) -> None:
+        """Present-and-null, not absent. `_to_response` reads it with `.get`
+        either way, but a key that appears only sometimes makes every consumer
+        downstream guess which generation of row it is holding."""
+        assert "seniority" in build_breakdown(0.5, score_skills([], []))

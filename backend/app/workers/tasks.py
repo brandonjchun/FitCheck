@@ -49,7 +49,7 @@ from app.scoring import (
     build_breakdown,
     score_skills,
 )
-from app.seniority import seniority_from_title
+from app.seniority import seniority_delta, seniority_from_title
 from app.workers.extract import extract_posting, extract_profile
 from app.queues import (
     FAILURE_TTL,
@@ -712,7 +712,15 @@ def score_posting_for_profile(
         final = blend(semantic, breakdown.score)
 
         payload = build_breakdown(
-            semantic, breakdown, extraction_failed=failure is not None
+            semantic,
+            breakdown,
+            extraction_failed=failure is not None,
+            seniority=seniority_delta(
+                profile.seniority,
+                posting.seniority,
+                candidate_years=profile.years_experience,
+                required_years=posting.min_years,
+            ),
         )
 
         # Upsert rather than insert. Re-scoring is normal -- a version bump, a
@@ -1351,6 +1359,12 @@ def score_profile(profile_id: int, limit: int = FEED_LIMIT) -> str:
 
         profile_vector = list(profile.embedding)
         profile_skills = profile.skills
+        # Read out here with the rest of the profile's scalars rather than off
+        # `profile` inside the loop, for the reason the other two are: the
+        # rerank is meant to touch nothing but Python, and an attribute access
+        # on a live ORM object is a lazy load waiting to happen.
+        profile_level = profile.seniority
+        profile_years = profile.years_experience
 
         candidates = recall_candidates(db, profile_vector, limit=RECALL_LIMIT)
         if not candidates:
@@ -1380,7 +1394,16 @@ def score_profile(profile_id: int, limit: int = FEED_LIMIT) -> str:
 
             breakdown = score_skills(posting.skills, profile_skills)
             final = blend(candidate.semantic_score, breakdown.score)
-            payload = build_breakdown(candidate.semantic_score, breakdown)
+            payload = build_breakdown(
+                candidate.semantic_score,
+                breakdown,
+                seniority=seniority_delta(
+                    profile_level,
+                    posting.seniority,
+                    candidate_years=profile_years,
+                    required_years=posting.min_years,
+                ),
+            )
             scored.append(
                 (final, posting.id, candidate.semantic_score, breakdown, payload)
             )

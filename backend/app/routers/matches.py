@@ -23,6 +23,7 @@ from app.schemas import (
     FeedbackCreate,
     FeedbackResponse,
     MatchResponse,
+    MatchSeniority,
     RecommendationRun,
     SavedMatch,
 )
@@ -65,6 +66,10 @@ def _to_response(match: Match, posting: JobPosting | None) -> MatchResponse:
     """
     breakdown = match.breakdown or {}
     counts = breakdown.get("counts") or {}
+    # `or None` rather than a bare `.get`, so a row written before the field
+    # existed and a row that stored an explicit null both come back as None
+    # instead of one of them becoming a validation error.
+    seniority = breakdown.get("seniority") or None
 
     return MatchResponse(
         id=match.id,
@@ -85,6 +90,7 @@ def _to_response(match: Match, posting: JobPosting | None) -> MatchResponse:
         skills=breakdown.get("skills", []),
         weights=breakdown.get("weights", {}),
         extraction_failed=breakdown.get("extraction_failed", False),
+        seniority=MatchSeniority(**seniority) if seniority else None,
         posting_url=posting.url if posting else None,
         posting_title=posting.title if posting else None,
         posting_company=posting.company if posting else None,

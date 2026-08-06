@@ -1732,6 +1732,16 @@
             "type": "boolean",
             "title": "Extraction Failed"
           },
+          "seniority": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MatchSeniority"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "posting_url": {
             "anyOf": [
               {
@@ -1784,6 +1794,92 @@
         ],
         "title": "MatchResponse",
         "description": "One scored (profile, posting) pair, with the reasoning attached.\n\nBoth sub-scores travel with the final one, and the skill breakdown\ntravels with both. Spec section 8.4 requires it, and the reason is that\na blended number alone is unfalsifiable -- 0.35 says nothing a user can\nact on, while \"you match 2 of 5 requirements and are short on React\nyears\" does."
+      },
+      "MatchSeniority": {
+        "properties": {
+          "profile_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Profile Level"
+          },
+          "posting_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Posting Level"
+          },
+          "steps": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Steps"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "match",
+              "under",
+              "over",
+              "unknown"
+            ],
+            "title": "Direction"
+          },
+          "candidate_years": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Candidate Years"
+          },
+          "required_years": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required Years"
+          },
+          "years_gap": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Years Gap"
+          }
+        },
+        "type": "object",
+        "required": [
+          "direction"
+        ],
+        "title": "MatchSeniority",
+        "description": "The level gap between the candidate and the role.\n\nThe counterpart to `MatchCounts` for the other half of \"why is this here\".\nSkills answer whether the candidate can do the work; this answers whether\nthe role is pitched at them.\n\n`direction` is what a UI should branch on, and it is carried rather than\nderived because the sign of `steps` cannot express all four cases: 0 means\na match and None means nobody could tell, and a client testing `steps < 0`\nreads both as \"not under\". The levels are carried alongside so the copy can\nname which side was missing."
       },
       "MatchSkill": {
         "properties": {

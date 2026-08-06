@@ -6,6 +6,7 @@ import {
   type FeedbackVerdict,
   type FeedFilters,
   type Match,
+  type MatchSeniority,
   type MatchSkill,
 } from "../api/client";
 import "./MatchFeed.css";
@@ -39,6 +40,58 @@ function band(score: number): "high" | "mid" | "low" {
   if (score >= 0.7) return "high";
   if (score >= 0.45) return "mid";
   return "low";
+}
+
+const STEPS_IN_WORDS: Record<number, string> = { 1: "one", 2: "two", 3: "three" };
+
+/**
+ * The level gap between the candidate and the role.
+ *
+ * The second half of "why is this here", beside the skill breakdown. A posting
+ * two rungs above someone is often the single most useful thing to say about a
+ * match whose skills all tick — and it is invisible in the blended score,
+ * because seniority deliberately does not feed it.
+ *
+ * **Renders nothing rather than guessing.** `direction: "unknown"` means one
+ * side or both never stated a level, which is 3,434 postings in the live
+ * catalog. Printing "level unknown" on all of them would be noise on a card
+ * that already carries two scores and four counts, so the level clause is
+ * simply omitted and the years clause stands alone if it has something to say.
+ * A card with neither shows no row at all.
+ */
+function SeniorityLine({ seniority }: { seniority: MatchSeniority }) {
+  const { direction, steps, posting_level, candidate_years, required_years } =
+    seniority;
+
+  let level: string | null = null;
+  if (direction === "match") {
+    level = "matches your level";
+  } else if ((direction === "under" || direction === "over") && steps != null) {
+    const word = STEPS_IN_WORDS[Math.abs(steps)] ?? String(Math.abs(steps));
+    const plural = Math.abs(steps) === 1 ? "level" : "levels";
+    level = `${word} ${plural} ${direction === "under" ? "above" : "below"} you`;
+  }
+
+  /* Same phrasing as SkillRow's years, deliberately. A reader who has learned
+   * "2 of 5 yrs" from the breakdown should not have to learn a second idiom
+   * for the same relationship one line up. The columns are Numeric(4,1), so a
+   * whole number arrives as 5.0 and renders as "5" without help. */
+  const years =
+    candidate_years != null && required_years != null
+      ? `${candidate_years} of ${required_years} yrs`
+      : null;
+
+  if (!level && !years) return null;
+
+  const role = posting_level && level ? `${posting_level} role` : null;
+
+  return (
+    <p className="mf-seniority" data-direction={direction}>
+      {role && <span className="mf-seniority-role">{role}</span>}
+      {level && <span className="mf-seniority-gap">{level}</span>}
+      {years && <span className="mf-seniority-years">{years}</span>}
+    </p>
+  );
 }
 
 function SkillRow({ skill }: { skill: MatchSkill }) {
@@ -197,6 +250,12 @@ function MatchCard({ match, rank }: { match: Match; rank: number }) {
               </span>
             )}
           </p>
+
+          {/* Absent on a match scored before the delta existed, which is why
+            * this is a null check rather than a `direction` check -- an older
+            * row has no opinion to render, and inventing "unknown" for it would
+            * claim a comparison that never ran. */}
+          {match.seniority && <SeniorityLine seniority={match.seniority} />}
         </div>
       </div>
 

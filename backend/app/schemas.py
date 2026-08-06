@@ -382,6 +382,31 @@ class MatchCounts(BaseModel):
     missing_required: int
 
 
+class MatchSeniority(BaseModel):
+    """The level gap between the candidate and the role.
+
+    The counterpart to `MatchCounts` for the other half of "why is this here".
+    Skills answer whether the candidate can do the work; this answers whether
+    the role is pitched at them.
+
+    `direction` is what a UI should branch on, and it is carried rather than
+    derived because the sign of `steps` cannot express all four cases: 0 means
+    a match and None means nobody could tell, and a client testing `steps < 0`
+    reads both as "not under". The levels are carried alongside so the copy can
+    name which side was missing.
+    """
+
+    profile_level: str | None = None
+    posting_level: str | None = None
+    # Signed from the candidate's side: negative means the role sits above
+    # them. Same orientation as `years_gap`, deliberately.
+    steps: int | None = None
+    direction: Literal["match", "under", "over", "unknown"]
+    candidate_years: float | None = None
+    required_years: float | None = None
+    years_gap: float | None = None
+
+
 class MatchResponse(BaseModel):
     """One scored (profile, posting) pair, with the reasoning attached.
 
@@ -415,6 +440,13 @@ class MatchResponse(BaseModel):
     skills: list[MatchSkill]
     weights: dict[str, float]
     extraction_failed: bool
+
+    # None for a match scored before the delta existed. Optional rather than
+    # defaulted to an empty gap, because a client has to be able to tell "this
+    # match predates the field" from "we compared and could not tell" -- the
+    # latter is a `MatchSeniority` whose direction is "unknown", and rendering
+    # that copy over an old row would be asserting something never computed.
+    seniority: MatchSeniority | None = None
 
     # Denormalized from the posting for display. A feed showing 50 matches
     # would otherwise need 50 extra requests, or a join the client has to

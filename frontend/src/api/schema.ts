@@ -971,12 +971,46 @@ export interface components {
             };
             /** Extraction Failed */
             extraction_failed: boolean;
+            seniority?: components["schemas"]["MatchSeniority"] | null;
             /** Posting Url */
             posting_url?: string | null;
             /** Posting Title */
             posting_title?: string | null;
             /** Posting Company */
             posting_company?: string | null;
+        };
+        /**
+         * MatchSeniority
+         * @description The level gap between the candidate and the role.
+         *
+         *     The counterpart to `MatchCounts` for the other half of "why is this here".
+         *     Skills answer whether the candidate can do the work; this answers whether
+         *     the role is pitched at them.
+         *
+         *     `direction` is what a UI should branch on, and it is carried rather than
+         *     derived because the sign of `steps` cannot express all four cases: 0 means
+         *     a match and None means nobody could tell, and a client testing `steps < 0`
+         *     reads both as "not under". The levels are carried alongside so the copy can
+         *     name which side was missing.
+         */
+        MatchSeniority: {
+            /** Profile Level */
+            profile_level?: string | null;
+            /** Posting Level */
+            posting_level?: string | null;
+            /** Steps */
+            steps?: number | null;
+            /**
+             * Direction
+             * @enum {string}
+             */
+            direction: "match" | "under" | "over" | "unknown";
+            /** Candidate Years */
+            candidate_years?: number | null;
+            /** Required Years */
+            required_years?: number | null;
+            /** Years Gap */
+            years_gap?: number | null;
         };
         /**
          * MatchSkill
