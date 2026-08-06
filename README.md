@@ -459,11 +459,13 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 | 13 | **M10** Feed UI + ops | Ranked feed with filters and inline explanation; feedback capture; ops dashboard | ✅ Done |
 | 14 | **M11** Load test + document | Locust burst on all paths; p50/p95/p99; queue depth under load | ✅ Done — **22,777 requests, 0.00% errors, feed p95 18 ms** |
 
+**All fourteen weeks are done.** Work after M11 is no longer milestone-shaped — it is breadth and correctness on the pipeline the milestones built: five more ATS adapters, the employer name taken from the board instead of the posting body, and a seniority delta on every match. Each is written up under [What's actually in the repo today](#whats-actually-in-the-repo-today).
+
 **Ship M1–M7 before touching M8.** A working single-path pipeline that fetches and fails gracefully is a complete, demoable system. A half-built crawler bolted to a queue that can't survive a timeout is not. That ordering was followed.
 
 ### What's actually in the repo today
 
-- **M1/M2 complete.** Resume upload, PDF/DOCX text extraction, LLM extraction behind a swappable provider seam (Gemini and Ollama), skill alias normalization, `extraction_version` stamped on every extraction, request size cap enforced in ASGI middleware, and a pytest suite covering documents, extraction, skills, providers, middleware, and endpoints. That suite was 171 tests at M2 and is **661** across the whole backend today.
+- **M1/M2 complete.** Resume upload, PDF/DOCX text extraction, LLM extraction behind a swappable provider seam (Gemini and Ollama), skill alias normalization, `extraction_version` stamped on every extraction, request size cap enforced in ASGI middleware, and a pytest suite covering documents, extraction, skills, providers, middleware, and endpoints. That suite was 171 tests at M2 and is **868** across the whole backend today.
 
   Two design points worth knowing. **Skill normalization happens on read, not on write** — `profiles.extracted` holds exactly what the model returned, so adding an alias applies retroactively to every stored profile with no backfill and no second LLM call. And **`extraction_version` is only bumped by prompt or schema changes**, not alias changes, because the latter no longer alter what was extracted.
 - **M3 complete.** Register, login, logout, and `/me`; Argon2id password hashing; opaque session ids in `HttpOnly` cookies with the body in Redis; and an `owned_profile` dependency that every profile-scoped endpoint takes so the ownership predicate cannot be left out of one handler. Reaching for another user's profile returns **404, not 403** — a 403 confirms the row exists and turns the endpoint into an id-enumeration oracle.
@@ -477,7 +479,7 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 - **M7 complete.** MiniLM embeddings (384-d) in pgvector for both profiles and postings, weighted skill overlap with partial credit, and a `0.6 semantic / 0.4 skill` blend whose full breakdown is persisted to `matches` and rendered inline. The weights are a stated judgment call, measured against five postings of known correct ordering — see `DECISIONS.md` D-059 and D-066.
 
   The blend was **inverted from `0.4/0.6` at `SCORER_VERSION` 2**, and the same five postings were recomputed rather than re-argued: the known-correct ordering is unchanged, with the unqualified posting still ranked below every qualified one. What moved is a trade — the qualified/unqualified gap narrows from 0.529 to 0.294, while discrimination *among* qualified roles widens from 0.122 to 0.183. A feed spends nearly all its time on the second question. Scores carry the version because a weight change makes an old score incomparable to a new one.
-- **M8 complete.** Five job boards crawled through their public APIs (Greenhouse, Lever, Ashby), a scheduler that decides when each is due, fan-out onto `ingest`, and closure detection guarded on full-enumeration success.
+- **M8 complete.** Job boards crawled through their public APIs, a scheduler that decides when each is due, fan-out onto `ingest`, and closure detection guarded on full-enumeration success. Three ATS kinds at M8 (Greenhouse, Lever, Ashby); **eight are supported today** — see the adapter entry below.
 
   **The content-hash gate hit 100% on a steady-state re-crawl** — 98 of 98 postings re-enumerated with unchanged content skipped extraction and embedding entirely, turning what would have been 98 LLM calls into zero. Reported live on the ops dashboard rather than asserted here.
 
@@ -498,7 +500,7 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
 
   Verified through the whole stack, not just in tests — API → `ingest` queue → containerised worker → `job_postings`. A four-URL batch drained in 4 seconds: two succeeded, two went straight to `dead` (a 404 and a robots disallow) without consuming a single retry.
 
-- **Frontend complete through M10.** Landing, sign-in, workspace, ranked feed, insights, saved, and the ops dashboard, all wired to session auth. The batch progress view that M4's definition of done asked for is there too — an aggregate poll per batch rather than one per job, with the bar scaled off the batch's own `total` so a missing job row shows as a short bar instead of rescaling to look finished. 127 component and hook tests, `tsc -b` and `oxlint` clean.
+- **Frontend complete through M10.** Landing, sign-in, workspace, ranked feed, insights, saved, and the ops dashboard, all wired to session auth. The batch progress view that M4's definition of done asked for is there too — an aggregate poll per batch rather than one per job, with the bar scaled off the batch's own `total` so a missing job row shows as a short bar instead of rescaling to look finished. 169 component and hook tests, `tsc -b` and `oxlint` clean.
 
   **Nobody has run it and looked at it.** Everything above is verified by typecheck, lint, and tests; layout and spacing are not verified by any of those.
 
@@ -522,6 +524,22 @@ Path A ships first and completely. Path B is built on top of a pipeline that alr
   **The slow numbers are all deliberate, and worth naming so they are not read as regressions.** Registration at 2.7 s is Argon2id, which is expensive on purpose; it alone accounts for the aggregate p99.9 of 2,700 ms. Upload at 180 ms is local PDF parsing, which is the work the 202-not-201 design moved *off* the LLM path, not onto it.
 
   A ~215-job catalog backfill was draining on `scoring` throughout, so these are numbers from a system doing background work rather than an idle one.
+
+- **Eight ATS kinds, added without a migration.** Workable, SmartRecruiters, Rippling, Breezy and USAJOBS joined Greenhouse, Lever and Ashby. `SourceKind`'s comment predicted the cost of this exactly — one `ADAPTERS` entry, one function, one name in the `Literal`, no schema change — because the column is `Text` and always was.
+
+  **They do not all cost the same, and the seed records which is which.** Workable returns descriptions inline, so it crawls in one request like Lever and Ashby. SmartRecruiters, Breezy and Rippling publish listings without bodies, so every posting is its own fetch; the first two date theirs, which lets an unchanged posting be skipped, while Rippling dates nothing and so re-fetches its whole board every time. That is why its 738 postings are seeded at a **weekly** interval rather than the 86400 default — the interval is load-bearing, not a preference.
+
+  USAJOBS is written and tested but **deliberately unseeded**: it is the one kind needing a credential, and an unconfigured key raises a named error rather than enumerating nothing, so a missing key can never be read as an agency with no openings. It is modelled per-agency rather than as one aggregator source, which is what keeps `display_name` an employer name.
+
+- **The employer name now comes from the board, not the posting body.** The extraction was being asked a question the text does not answer. Measured over the live catalog: **19,691 board-sourced postings held 28 companies between them**, and most of those were the ATS vendor read off page boilerplate — "Ashby" 22 times, "Greenhouse" once, and one row that came back as `>{`. Meanwhile `sources.display_name` had the answer already, seeded by hand.
+
+  So the board wins wherever there is one and the extraction is consulted only for a sourceless posting — a bare user-submitted URL. This is the **opposite** precedence to `title`, deliberately: a title is stated per posting and both readers see the same string, so either can be right. A company is not stated per posting at all. Repaired by `scripts/backfill_company.py`, and by the gate-hit branch thereafter — which is the branch that mattered, since those 19,691 rows never change content and would otherwise have been repaired only by the script. **Catalog today: 162 distinct companies.**
+
+- **Matches say how far a role sits above the candidate.** Skills answer whether someone can do the work; they do not answer whether the role is pitched at them, and a posting two rungs up is often the most useful thing to say about a match whose skills all tick.
+
+  **It does not bump `SCORER_VERSION`, and that is the rule rather than an exception.** The version tracks whether two stored scores are comparable; nothing here reaches `blend`, and `final_score` is byte-identical with the delta present or absent. Scoring *on* seniority would bump it and would need every stored match re-run — a separate decision, not smuggled in with this one.
+
+  The design is mostly about refusing to answer. `"unknown"` is not a rung on the ladder — ranking it anywhere, including above `staff`, would let an absence of evidence produce a confident gap. `direction` is carried rather than derived, because the sign of `steps` cannot express all four cases: `0` is a match and `None` is nobody-could-tell, and a client testing `steps < 0` reads both as "not under". Level and years stay independent, so neither is ever inferred from the other. The feed null-checks the object (a match scored before the field existed has no opinion to render) and omits the level clause entirely for the **3,353** open postings that state no level, rather than printing "level unknown" across all of them.
 
 - **Retry behaviour is proven against a real worker.** `tests/test_retry_integration.py` drives an RQ worker through the whole schedule — transient failure, reschedule, backoff, exhaustion, dead-letter — plus the recovery case, without which every other assertion is also satisfied by a worker that retries and can never succeed.
 
