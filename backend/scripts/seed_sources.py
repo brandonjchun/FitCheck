@@ -36,12 +36,20 @@ trailing comments are recorded: they are the evidence that a row was real at
 seed time, and a board that later drops to zero is then visibly a change
 rather than an unknown.
 
-**Cost is no longer the reason to prefer one board kind.** The original list
-was five boards, weighted to Lever and Ashby because those return descriptions
-inline while Greenhouse required one fetch per posting through a shared 1 rps
-bucket. Greenhouse now enumerates with `?content=true` (see D-067), so all
-three kinds cost exactly one request per board per crawl regardless of size.
-That is what makes 108 Greenhouse boards tractable where 2 were not.
+**Cost is no longer the reason to prefer one board kind -- with three
+exceptions added at M11.** The original list was five boards, weighted to Lever
+and Ashby because those return descriptions inline while Greenhouse required one
+fetch per posting through a shared 1 rps bucket. Greenhouse now enumerates with
+`?content=true` (see D-067), so Greenhouse, Lever, Ashby and Workable all cost
+exactly one request per board per crawl regardless of size. That is what makes
+108 Greenhouse boards tractable where 2 were not.
+
+SmartRecruiters, Breezy and Rippling do not have that property: their listings
+carry no descriptions, so each posting is a separate fetch. SmartRecruiters and
+Breezy at least date their postings, which lets a re-crawl skip the unchanged
+ones. Rippling dates nothing, so it re-fetches its whole board every time --
+which is why it is seeded at a weekly interval rather than the 86400 default.
+That interval is load-bearing, not a preference; see the entry.
 
 **What running this actually commits you to.** 159 boards, ~19,170 postings.
 Enumeration is trivial -- 159 requests. Extraction is not: every posting new
@@ -231,6 +239,60 @@ SOURCES = [
     ("greenhouse", "webflow", "Webflow", 86400),  # 28
     ("greenhouse", "zoominfo", "ZoomInfo", 86400),  # 107
     ("greenhouse", "zscaler", "Zscaler", 86400),  # 302
+    # --- workable (5 boards, 96 postings) ---
+    #
+    # Inline content, so these cost one request per crawl like Lever and Ashby.
+    #
+    # The skew is real and worth naming rather than hiding: Workable was founded
+    # in Athens and its public boards are heavily Greek and European. That is a
+    # coverage fact about this ATS, not a sampling mistake -- adding Workable
+    # broadens the catalog geographically more than it does by industry.
+    ("workable", "blueground", "Blueground", 86400),  # 28
+    ("workable", "orfium", "Orfium", 86400),  # 21
+    ("workable", "skroutz", "Skroutz", 86400),  # 10
+    ("workable", "spotawheel", "Spotawheel", 86400),  # 34
+    ("workable", "persado", "Persado", 86400),  # 3
+    # --- smartrecruiters (1 board, 2 postings) ---
+    #
+    # Thin, and the reason is token discovery rather than the adapter. A
+    # SmartRecruiters company id is not the brand slug: of Bosch, McDonalds,
+    # Deloitte, IKEA, Publicis, Ubisoft, Sanofi, Vodafone and LinkedIn, every
+    # one answered `200` with `totalFound: 0`. Only `Visa` resolved. Their ids
+    # have to be read off a company's real careers URL, one at a time -- which
+    # is the same silent-failure trap this file's header describes, at its
+    # worst.
+    ("smartrecruiters", "Visa", "Visa", 86400),  # 2
+    # --- breezy (1 board, 3 postings) ---
+    #
+    # Per-posting fetch, but on a per-company subdomain, so two Breezy boards
+    # do not contend for one token bucket the way two SmartRecruiters boards do.
+    ("breezy", "breezy", "Breezy HR", 86400),  # 3
+    # --- rippling (1 board, 738 postings) ---
+    #
+    # **Weekly, not daily, and the interval is the whole point of this entry.**
+    # Rippling publishes no date of any kind in its listing, so
+    # `_posting_needs_fetch` cannot skip anything and all 738 postings are
+    # re-fetched on every crawl -- ~12 minutes through the shared
+    # `ats.rippling.com` bucket. Daily, that is 84 minutes a week of fetching to
+    # learn what a weekly crawl learns in 12.
+    #
+    # 604800 rather than 86400 for that reason alone. If a second Rippling board
+    # is ever added, this is the number to copy.
+    ("rippling", "rippling", "Rippling", 604800),  # 738
+    # --- usajobs (not seeded) ---
+    #
+    # Deliberately absent, not forgotten. `enumerate_usajobs` is written and
+    # tested but has never run against a live response, because the key is
+    # per-developer and free from developer.usajobs.gov -- set USAJOBS_API_KEY
+    # and USAJOBS_EMAIL, then add agencies by their `Organization` code:
+    #
+    #     ("usajobs", "TR", "Department of the Treasury", 86400),
+    #     ("usajobs", "IN", "Department of the Interior", 86400),
+    #
+    # One source per agency rather than one for the whole corpus, so
+    # `display_name` stays an employer and the company backfill keeps working.
+    # Seeding one unverified is how a board ends up looking healthy and
+    # contributing nothing, which is the failure this file exists to prevent.
 ]
 
 

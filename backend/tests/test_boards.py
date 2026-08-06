@@ -1,18 +1,33 @@
-"""Board adapters: three APIs that agree on nothing.
+"""Board adapters: eight APIs that agree on nothing.
 
-Fixtures are trimmed copies of real responses captured on 2026-08-03, not
-invented shapes. That matters because the bugs these guard against are all
-"the board does not look like the other boards":
+Fixtures are trimmed copies of real responses -- the first three captured
+2026-08-03, the next four 2026-08-06 -- not invented shapes. That matters
+because the bugs these guard against are all "the board does not look like the
+other boards":
 
-    board       envelope        id       url            title   change signal   content
-    ---------   -------------   ------   ------------   -----   -------------   -----------
-    Greenhouse  {"jobs": [..]}  id       absolute_url   title   updated_at      none
-    Lever       [..] bare list  id       hostedUrl      text    none            inline
-    Ashby       {"jobs": [..]}  id       jobUrl         title   none            inline
+    board            envelope           id          url            title   change signal    content
+    --------------   ----------------   ---------   ------------   -----   --------------   -------
+    Greenhouse       {"jobs": [..]}     id          absolute_url   title   updated_at       inline
+    Lever            [..] bare list     id          hostedUrl      text    none             inline
+    Ashby            {"jobs": [..]}     id          jobUrl         title   none             inline
+    Workable         {"jobs": [..]}     shortcode   url            title   none             inline
+    SmartRecruiters  {"content": [..]}  id          composed       name    releasedDate     none
+    BreezyHR         [..] bare list     id          url            name    published_date   none
+    Rippling         {"items": [..]}    uuid        url            name    none             none
+    USAJOBS          nested 3 deep      MatchedId   PositionURI    Position PublicationStart inline
 
-Every column differs somewhere, and the network is stubbed at `_get_json` so
-these run offline and deterministically -- the live checks belong in the
-crawl, not in a suite that has to pass on a plane.
+Every column differs somewhere. Two are worth calling out because they are not
+merely different but actively misleading: SmartRecruiters carries
+`defaultJobAd` as a **boolean**, so an adapter that reads it as the ad gets
+`True` where prose should be; and USAJOBS mixes a string field with an array
+field inside one object, so interpolating both the same way puts a Python list
+repr into the text.
+
+The network is stubbed at `_get_json`, so these run offline and
+deterministically -- the live checks belong in the crawl, not in a suite that
+has to pass on a plane. `enumerate_usajobs` is the one adapter never verified
+against a live response, because its key is per-developer; these fixtures are
+its only evidence and are built from the documented shape.
 """
 
 import pytest
@@ -21,9 +36,14 @@ from app import boards
 from app.boards import (
     DiscoveredPosting,
     enumerate_ashby,
+    enumerate_breezy,
     enumerate_greenhouse,
     enumerate_lever,
+    enumerate_rippling,
+    enumerate_smartrecruiters,
     enumerate_source,
+    enumerate_usajobs,
+    enumerate_workable,
 )
 from app.workers.fetch import PermanentFetchError
 
@@ -82,12 +102,153 @@ ASHBY = {
 }
 
 
+# Trimmed from `apply.workable.com/api/v1/widget/accounts/blueground?details=true`.
+# `description` is real HTML, not escaped HTML -- the opposite of Greenhouse, so
+# a single strip is correct here and a double one would eat the prose.
+WORKABLE = {
+    "name": "Blueground",
+    "jobs": [
+        {
+            "shortcode": "186545F8C1",
+            "title": "Client Experience Coordinator",
+            "url": "https://apply.workable.com/j/186545F8C1",
+            "description": "<h3>Redefining how people live.</h3><p>Join us.</p>",
+            "requirements": "<ul><li>3 years of Greek</li></ul>",
+            "benefits": "<p>Flexible hours</p>",
+            "published_on": "2026-02-12",
+            "created_at": "2025-09-30",
+            "experience": "Associate",
+            "employment_type": "Full-time",
+            "telecommuting": False,
+        },
+        # No shortcode -- unaddressable, so it cannot become a canonical_key.
+        {"title": "Ghost", "url": "https://apply.workable.com/j/nope"},
+    ],
+}
+
+# Trimmed from `api.smartrecruiters.com/v1/companies/Visa/postings`. Note
+# `defaultJobAd: true` -- a boolean, and the trap this fixture exists to hold.
+SMARTRECRUITERS = {
+    "offset": 0,
+    "limit": 100,
+    "totalFound": 2,
+    "content": [
+        {
+            "id": "744000133907678",
+            "uuid": "e0a1f0c2-0000-4000-8000-000000000001",
+            "name": "Sr. Manager",
+            "company": {"identifier": "Visa", "name": "Visa"},
+            "releasedDate": "2026-07-30T10:15:00.000Z",
+            "experienceLevel": {"id": "director_and_above"},
+            "location": {"city": "Austin", "country": "us"},
+            "defaultJobAd": True,
+        },
+        {
+            "id": "744000133907679",
+            "name": "Staff Software Engineer",
+            "releasedDate": "2026-08-01T09:00:00.000Z",
+            "postingUrl": "https://jobs.smartrecruiters.com/Visa/744000133907679",
+            "defaultJobAd": True,
+        },
+    ],
+}
+
+# Trimmed from `api.rippling.com/platform/api/ats/v1/board/rippling/jobs`.
+# No date field of any kind, which is the property the adapter documents.
+RIPPLING = {
+    "items": [
+        {
+            "uuid": "2f0674e6-f01f-4ecd-b459-e947241c211f",
+            "name": "Account Executive - Accountants Channel",
+            "department": {"id": "Sales", "label": "Sales"},
+            "url": "https://ats.rippling.com/rippling/jobs/2f0674e6-f01f-4ecd-b459-e947241c211f",
+            "workLocation": {"label": "New York"},
+        },
+        {"name": "No uuid", "url": "https://ats.rippling.com/rippling/jobs/x"},
+    ]
+}
+
+# Trimmed from `breezy.breezy.hr/json` -- a bare list, like Lever.
+BREEZY = [
+    {
+        "id": "98323abf2296",
+        "friendly_id": "98323abf2296-employee-12",
+        "name": "Employee #12",
+        "url": "https://breezy.breezy.hr/p/98323abf2296-employee-12",
+        "published_date": "2024-02-15T14:37:22.684Z",
+        "type": {"id": "full-time", "name": "Full-Time"},
+    },
+]
+
+# Built from the documented USAJOBS shape, not a captured response -- see the
+# module docstring. `MajorDuties` is an array while `JobSummary` is a string,
+# in the same object, which is the corruption this fixture guards against.
+USAJOBS = {
+    "SearchResult": {
+        "SearchResultCount": 1,
+        "SearchResultCountAll": 1,
+        "SearchResultItems": [
+            {
+                "MatchedObjectId": "830216900",
+                "MatchedObjectDescriptor": {
+                    "PositionID": "IRS-26-0001",
+                    "PositionTitle": "Data Scientist",
+                    "PositionURI": "https://www.usajobs.gov/job/830216900",
+                    "PublicationStartDate": "2026-07-02",
+                    "UserArea": {
+                        "Details": {
+                            "JobSummary": "Analyse compliance data.",
+                            "MajorDuties": [
+                                "Build models.",
+                                "Brief leadership.",
+                            ],
+                            "Qualifications": "Five years of Python.",
+                        }
+                    },
+                },
+            },
+            # No PositionURI -- nothing to fetch, so it cannot be stored.
+            {"MatchedObjectId": "1", "MatchedObjectDescriptor": {"PositionTitle": "X"}},
+        ],
+    }
+}
+
+
 @pytest.fixture
 def payload(monkeypatch):
-    """Serve a canned board response in place of the network."""
+    """Serve a canned board response in place of the network.
+
+    The stub takes `headers` because USAJOBS passes them and every other
+    adapter does not. A one-argument stub here would raise TypeError from
+    inside the adapter under test, which reads as a bug in the adapter rather
+    than in the fixture.
+    """
 
     def install(value):
-        monkeypatch.setattr(boards, "_get_json", lambda url: value)
+        monkeypatch.setattr(boards, "_get_json", lambda url, headers=None: value)
+
+    return install
+
+
+@pytest.fixture
+def pages(monkeypatch):
+    """Serve a different response per call, for the paginated boards.
+
+    Records the URLs it was asked for, because with pagination the *requests*
+    are half the behaviour under test -- an adapter that returns the right rows
+    while walking the offset wrongly still stops early on a real board.
+    """
+
+    def install(values):
+        seen: list[str] = []
+        queue = list(values)
+
+        def fake(url, headers=None):
+            seen.append(url)
+            return queue.pop(0) if queue else values[-1]
+
+        monkeypatch.setattr(boards, "_get_json", fake)
+        return seen
 
     return install
 
@@ -261,14 +422,307 @@ class TestAshby:
         assert "x()" not in content  # script stripped by html_to_text
 
 
+class TestWorkable:
+    def test_maps_the_fields(self, payload) -> None:
+        payload(WORKABLE)
+
+        rows = enumerate_workable("blueground")
+
+        assert len(rows) == 1
+        assert rows[0].external_id == "186545F8C1"
+        assert rows[0].url == "https://apply.workable.com/j/186545F8C1"
+        assert rows[0].title == "Client Experience Coordinator"
+
+    def test_strips_the_html_once_not_twice(self, payload) -> None:
+        """Workable returns real HTML, unlike Greenhouse's escaped form. Running
+        the unescape step on it first would be harmless here but the reverse --
+        skipping the strip -- leaves tags in the text every skill is matched
+        against."""
+        payload(WORKABLE)
+
+        content = enumerate_workable("blueground")[0].content
+
+        assert "<h3>" not in content
+        assert "Redefining how people live." in content
+
+    def test_appends_requirements_and_benefits(self, payload) -> None:
+        """The requirements block is a separate field, and it is the half the
+        scorer needs -- `description` alone is the pitch."""
+        payload(WORKABLE)
+
+        content = enumerate_workable("blueground")[0].content
+
+        assert "3 years of Greek" in content
+        assert "Flexible hours" in content
+
+    def test_publishes_no_change_signal(self, payload) -> None:
+        """`published_on` is a publication date, not a modification one. Using
+        it would skip an edited posting forever; the content hash catches edits
+        instead, which is affordable because the content arrives free."""
+        payload(WORKABLE)
+
+        assert enumerate_workable("blueground")[0].updated_at is None
+
+    def test_an_empty_board_is_not_an_error(self, payload) -> None:
+        """Verified live: `hotjar` and `typeform` both resolve and return zero
+        jobs because they have nothing open. Raising would trip
+        `consecutive_failures` on a healthy board that is simply not hiring."""
+        payload({"name": "Hotjar", "jobs": []})
+
+        assert enumerate_workable("hotjar") == []
+
+    def test_a_payload_without_jobs_is_permanent(self, payload) -> None:
+        payload({"name": "Hotjar"})
+
+        with pytest.raises(PermanentFetchError, match="Workable"):
+            enumerate_workable("hotjar")
+
+
+class TestSmartRecruiters:
+    def test_maps_the_fields(self, payload) -> None:
+        payload(SMARTRECRUITERS)
+
+        rows = enumerate_smartrecruiters("Visa")
+
+        assert [r.external_id for r in rows] == ["744000133907678", "744000133907679"]
+        assert rows[0].title == "Sr. Manager"
+
+    def test_never_reads_defaultJobAd_as_content(self, payload) -> None:
+        """It is a boolean. An adapter that treated it as the ad would store
+        `True` as a posting body, hash it, and score against it -- and the row
+        would look populated the whole way down."""
+        payload(SMARTRECRUITERS)
+
+        assert all(r.content is None for r in enumerate_smartrecruiters("Visa"))
+
+    def test_composes_a_url_when_the_listing_omits_one(self, payload) -> None:
+        """`postingUrl` is absent from the list response for some postings, and
+        the composed form has to use the same id `external_id` does or the
+        canonical_key will not match what the fetch resolves."""
+        payload(SMARTRECRUITERS)
+
+        rows = enumerate_smartrecruiters("Visa")
+
+        assert rows[0].url == "https://jobs.smartrecruiters.com/Visa/744000133907678"
+        assert rows[1].url == "https://jobs.smartrecruiters.com/Visa/744000133907679"
+
+    def test_uses_releasedDate_as_the_change_signal(self, payload) -> None:
+        payload(SMARTRECRUITERS)
+
+        assert enumerate_smartrecruiters("Visa")[0].updated_at is not None
+
+    def test_walks_every_page(self, pages) -> None:
+        """The default page size is 10, so an adapter that trusts one response
+        caps every board at ten postings and looks like a catalog of very small
+        companies. This is the loop's only test -- no live board large enough to
+        page was reachable, since SmartRecruiters ids are not brand slugs."""
+        first = {
+            "offset": 0,
+            "limit": 100,
+            "totalFound": 150,
+            "content": [
+                {"id": str(i), "name": f"Role {i}", "releasedDate": "2026-08-01"}
+                for i in range(100)
+            ],
+        }
+        second = {
+            "offset": 100,
+            "limit": 100,
+            "totalFound": 150,
+            "content": [
+                {"id": str(i), "name": f"Role {i}", "releasedDate": "2026-08-01"}
+                for i in range(100, 150)
+            ],
+        }
+        seen = pages([first, second])
+
+        rows = enumerate_smartrecruiters("Big")
+
+        assert len(rows) == 150
+        assert "offset=0" in seen[0]
+        assert "offset=100" in seen[1]
+        # Stopped rather than asking for a third page it did not need.
+        assert len(seen) == 2
+
+    def test_an_empty_page_ends_the_walk(self, pages) -> None:
+        """`totalFound` over-reports on real boards -- it counts postings the
+        public API will not return -- so an empty page has to end the loop or it
+        spins to the page cap."""
+        seen = pages(
+            [
+                {"totalFound": 999, "content": [{"id": "1", "name": "One"}]},
+                {"totalFound": 999, "content": []},
+            ]
+        )
+
+        assert len(enumerate_smartrecruiters("Weird")) == 1
+        assert len(seen) == 2
+
+
+class TestRippling:
+    def test_maps_the_fields(self, payload) -> None:
+        payload(RIPPLING)
+
+        rows = enumerate_rippling("rippling")
+
+        assert len(rows) == 1
+        assert rows[0].external_id == "2f0674e6-f01f-4ecd-b459-e947241c211f"
+        assert rows[0].title == "Account Executive - Accountants Channel"
+
+    def test_has_neither_content_nor_a_change_signal(self, payload) -> None:
+        """Both absent is what makes this the expensive board kind: every
+        posting is re-fetched on every crawl, 738 of them on the live board."""
+        payload(RIPPLING)
+
+        row = enumerate_rippling("rippling")[0]
+        assert row.content is None
+        assert row.updated_at is None
+
+    def test_accepts_a_bare_list_too(self, payload) -> None:
+        """Rippling has answered with both shapes across versions. Unlike
+        Lever, the bare list is the unexpected one here -- so it is handled
+        rather than rejected, because the alternative reads as an empty board
+        and trips closure detection across it."""
+        payload(RIPPLING["items"])
+
+        assert len(enumerate_rippling("rippling")) == 1
+
+
+class TestBreezy:
+    def test_maps_the_fields(self, payload) -> None:
+        payload(BREEZY)
+
+        rows = enumerate_breezy("breezy")
+
+        assert len(rows) == 1
+        assert rows[0].external_id == "98323abf2296"
+        assert rows[0].url == "https://breezy.breezy.hr/p/98323abf2296-employee-12"
+        assert rows[0].title == "Employee #12"
+
+    def test_a_bare_list_is_the_expected_shape(self, payload) -> None:
+        """Reading it as a dict yields nothing rather than raising -- the same
+        trap Lever's docstring names."""
+        payload({"jobs": BREEZY})
+
+        with pytest.raises(PermanentFetchError, match="BreezyHR"):
+            enumerate_breezy("breezy")
+
+    def test_dates_its_postings(self, payload) -> None:
+        payload(BREEZY)
+
+        assert enumerate_breezy("breezy")[0].updated_at is not None
+
+
+class TestUsajobs:
+    def test_requires_a_key_and_says_so(self, monkeypatch) -> None:
+        """Raising rather than returning empty. An unconfigured source that
+        enumerates nothing is indistinguishable from an agency with no
+        openings, and closure detection would tombstone the agency's whole
+        catalog on a crawl that reported success."""
+        monkeypatch.setattr(boards.settings, "usajobs_api_key", "")
+        monkeypatch.setattr(boards.settings, "usajobs_email", "")
+
+        with pytest.raises(PermanentFetchError, match="USAJOBS_API_KEY"):
+            enumerate_usajobs("TR")
+
+    @pytest.fixture
+    def configured(self, monkeypatch):
+        monkeypatch.setattr(boards.settings, "usajobs_api_key", "test-key")
+        monkeypatch.setattr(boards.settings, "usajobs_email", "dev@example.com")
+
+    def test_maps_the_nested_fields(self, payload, configured) -> None:
+        payload(USAJOBS)
+
+        rows = enumerate_usajobs("IRS")
+
+        assert len(rows) == 1
+        assert rows[0].external_id == "830216900"
+        assert rows[0].url == "https://www.usajobs.gov/job/830216900"
+        assert rows[0].title == "Data Scientist"
+        assert rows[0].updated_at is not None
+
+    def test_joins_an_array_field_without_leaking_a_list_repr(
+        self, payload, configured
+    ) -> None:
+        """`MajorDuties` is an array and `JobSummary` is a string, in the same
+        object. Interpolating both with `str()` puts brackets, quotes and commas
+        into the text every skill and keyword is matched against -- the same
+        class of silent corruption as double-escaped HTML."""
+        payload(USAJOBS)
+
+        content = enumerate_usajobs("IRS")[0].content
+
+        assert "Build models." in content
+        assert "Brief leadership." in content
+        assert "[" not in content
+        assert "'," not in content
+
+    def test_carries_the_qualifications(self, payload, configured) -> None:
+        """JobSummary alone is preamble. The qualifications are the half the
+        scorer needs, so dropping them would leave a posting that reads fine and
+        scores against nothing."""
+        payload(USAJOBS)
+
+        assert "Five years of Python." in enumerate_usajobs("IRS")[0].content
+
+    def test_sends_the_key_and_the_registered_email(self, monkeypatch, configured) -> None:
+        """Their terms ask that the User-Agent be the email the key was
+        registered to, which is why it is a separate setting from
+        `fetch_user_agent` rather than a reuse of it."""
+        captured: dict = {}
+
+        def fake(url, headers=None):
+            captured["headers"] = headers or {}
+            return USAJOBS
+
+        monkeypatch.setattr(boards, "_get_json", fake)
+        enumerate_usajobs("IRS")
+
+        assert captured["headers"]["Authorization-Key"] == "test-key"
+        assert captured["headers"]["User-Agent"] == "dev@example.com"
+
+    def test_scopes_the_query_to_one_agency(self, monkeypatch, configured) -> None:
+        """The whole reason this is per-agency: it keeps `board_token` meaningful
+        and `sources.display_name` an employer, so `_company_for_source` stamps
+        the agency rather than "USAJOBS" on every posting."""
+        seen: list[str] = []
+
+        def fake(url, headers=None):
+            seen.append(url)
+            return USAJOBS
+
+        monkeypatch.setattr(boards, "_get_json", fake)
+        enumerate_usajobs("IRS")
+
+        assert "Organization=IRS" in seen[0]
+
+
 class TestDispatch:
     @pytest.mark.parametrize(
-        "kind, fixture", [("greenhouse", GREENHOUSE), ("lever", LEVER), ("ashby", ASHBY)]
+        "kind, fixture",
+        [
+            ("greenhouse", GREENHOUSE),
+            ("lever", LEVER),
+            ("ashby", ASHBY),
+            ("workable", WORKABLE),
+            ("smartrecruiters", SMARTRECRUITERS),
+            ("rippling", RIPPLING),
+            ("breezy", BREEZY),
+        ],
     )
     def test_every_declared_kind_has_an_adapter(self, payload, kind, fixture) -> None:
         payload(fixture)
 
         assert enumerate_source(kind, "token")
+
+    def test_usajobs_dispatches_too(self, payload, monkeypatch) -> None:
+        """Separate because it is the one kind that needs configuration, and a
+        parametrized case would fail for the wrong reason."""
+        monkeypatch.setattr(boards.settings, "usajobs_api_key", "k")
+        monkeypatch.setattr(boards.settings, "usajobs_email", "e@example.com")
+        payload(USAJOBS)
+
+        assert enumerate_source("usajobs", "IRS")
 
     def test_an_unknown_kind_is_permanent(self) -> None:
         """`careers_page` is a declared source kind with no adapter, because

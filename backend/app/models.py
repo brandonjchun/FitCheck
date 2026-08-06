@@ -896,7 +896,23 @@ class MatchFeedback(Base):
 # Text rather than an enum for the same reason `status` is: adding a kind is
 # a no-op on a text column and an ALTER TYPE on an enum, and the set of job
 # boards worth crawling is exactly the sort of thing that grows.
-SourceKind = Literal["greenhouse", "lever", "ashby", "careers_page"]
+#
+# The four added at M11 arrived as exactly the no-op that comment predicted:
+# one `ADAPTERS` entry, one function, one name here, and no migration. Note
+# `usajobs` is a federal *agency* rather than a company -- see
+# `boards.enumerate_usajobs` for why it is modelled per-agency and not as one
+# aggregator source, which is the choice that keeps `display_name` an employer.
+SourceKind = Literal[
+    "greenhouse",
+    "lever",
+    "ashby",
+    "workable",
+    "smartrecruiters",
+    "rippling",
+    "breezy",
+    "usajobs",
+    "careers_page",
+]
 
 
 class Source(Base):

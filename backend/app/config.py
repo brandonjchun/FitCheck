@@ -159,6 +159,18 @@ class Settings(BaseSettings):
         "student project; contact via repository issues)"
     )
 
+    # USAJOBS is the one board kind that requires a credential, and it is free
+    # and instant from developer.usajobs.gov. Empty by default so the rest of
+    # the app starts without it -- `enumerate_usajobs` raises a named error when
+    # a source of that kind is crawled unconfigured, which is a better failure
+    # than a startup that refuses to boot over a board nobody seeded.
+    #
+    # Two values rather than one because their terms ask that the User-Agent be
+    # the email the key was registered to. Reusing `fetch_user_agent` would send
+    # them a string they cannot tie to an account.
+    usajobs_api_key: str = ""
+    usajobs_email: str = ""
+
     # Split rather than one number. Connect failures should surface fast --
     # a host that will not accept a TCP connection in 5s is down, and waiting
     # 20 to learn that wastes a worker slot. Read gets longer because a slow
